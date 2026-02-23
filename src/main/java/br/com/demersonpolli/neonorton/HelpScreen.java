@@ -19,7 +19,7 @@ public class HelpScreen implements AppScreen {
         "",
         "  F1          Show this help",
         "  ESC         Close help",
-        "  F3+Q        Quit editor",
+        "  F3          File operations (Quit, Save, ...)",
         "  Arrows      Move cursor",
         "  Home / End  Start / end of line",
         "  Enter       New line",

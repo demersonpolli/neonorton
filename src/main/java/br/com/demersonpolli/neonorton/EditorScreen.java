@@ -10,6 +10,9 @@ import com.googlecode.lanterna.input.KeyType;
 import com.googlecode.lanterna.screen.Screen;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -34,12 +37,32 @@ public class EditorScreen implements AppScreen {
     // Terminal width cached for status bar centering
     private int statusBarCols = 80;
 
-    // Status bar
+    // Status bar cached for file-operation overlay
     private StatusBar statusBar;
+    private StatusBar fileOpBar;
+    // Signal to break out of main loop after file operations
+    private boolean shouldQuit = false;
 
     public EditorScreen(String fileName) {
         this.fileName = fileName;
-        lines.add(new StringBuilder());
+        if (!fileName.isEmpty()) {
+            Path path = Paths.get(fileName);
+            if (Files.exists(path)) {
+                try {
+                    List<String> fileLines = Files.readAllLines(path);
+                    for (String line : fileLines) {
+                        lines.add(new StringBuilder(line));
+                    }
+                    if (lines.isEmpty()) lines.add(new StringBuilder());
+                } catch (IOException e) {
+                    lines.add(new StringBuilder()); // fallback to empty on read error
+                }
+            } else {
+                lines.add(new StringBuilder()); // new file
+            }
+        } else {
+            lines.add(new StringBuilder()); // no name, empty buffer
+        }
     }
 
     @Override
@@ -52,20 +75,20 @@ public class EditorScreen implements AppScreen {
             String displayName = (fileName.isEmpty() ? "[No Name]" : fileName).toUpperCase();
             int centerCol = Math.max(12, (statusBarCols - displayName.length()) / 2);
 
-            // Status bar at last row, fixed columns:
-            //  col  0        : Line=N
-            //  col 11        : Col=M
-            //  col center    : FILENAME (uppercase, centered)
-            //  col 58        : Insert / Replace
-            //  col 67        : WW=On / WW=Off
+            // Normal status bar
             statusBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,         11,        centerCol,    58,         67       },
+                new int[]   {  0,        11,         centerCol,    58,         67       },
                 new String[]{ "Line=1", "Col=1", displayName, "Insert", "WW=Off" }
             );
-            redraw(screen);
 
-            boolean waitingForQ = false;
+            // File-operation overlay bar (shown while F3 mode is active)
+            fileOpBar = new StatusBar(
+                rows - 1,
+                new int[]   {  0,          9,               26,      33,      40,                59,      65,       73,   76,   79 },
+                new String[]{ "F3 FILE:", "Exit-with-save", "Quit", "Save", "eXchange-windows", "New", "Append", "L", "W", "C" }
+            );
+            redraw(screen);
 
             while (true) {
                 KeyStroke key = screen.readInput();
@@ -73,17 +96,12 @@ public class EditorScreen implements AppScreen {
 
                 if (type == KeyType.EOF) break;
 
-                // F3+Q sequence — quit
-                if (waitingForQ) {
-                    waitingForQ = false;
-                    if (type == KeyType.Character && key.getCharacter() == 'q') {
-                        break;
-                    }
-                    // Not Q — treat F3 as nothing, process this key normally
-                }
-
+                // F3 — enter file operation mode
                 if (type == KeyType.F3) {
-                    waitingForQ = true;
+                    handleFileOperation(screen);
+                    if (shouldQuit) break;
+                    updateStatusBar();
+                    redraw(screen);
                     continue;
                 }
 
@@ -230,5 +248,38 @@ public class EditorScreen implements AppScreen {
         // label 2 is the filename — static, no update needed
         statusBar.setLabel(3, insertMode ? "Insert " : "Replace");
         statusBar.setLabel(4, wordWrap   ? "WW=On " : "WW=Off");
+    }
+
+    private void handleFileOperation(Screen screen) throws IOException {        // Show the file-operation status bar
+        fileOpBar.render(screen);
+        screen.refresh();
+
+        KeyStroke key = screen.readInput();
+        if (key.getKeyType() != KeyType.Character) return;
+
+        switch (Character.toLowerCase(key.getCharacter())) {
+            case 'q' -> shouldQuit = true;              // Quit without save
+            case 'e' -> { saveFile(); shouldQuit = true; } // Exit with save
+            case 's' -> saveFile();                     // Save
+            case 'x' -> { /* TODO: eXchange windows */ }
+            case 'n' -> { /* TODO: New file */ }
+            case 'a' -> { /* TODO: Append file */ }
+            case 'l' -> { /* TODO: L */ }
+            case 'w' -> { /* TODO: W */ }
+            case 'c' -> { /* TODO: C */ }
+            default  -> { /* cancel */ }
+        }
+    }
+
+    private void saveFile() {
+        if (fileName.isEmpty()) return;
+        try {
+            Path path = Paths.get(fileName);
+            List<String> content = new ArrayList<>();
+            for (StringBuilder line : lines) content.add(line.toString());
+            Files.write(path, content);
+        } catch (IOException e) {
+            // TODO: surface error to user
+        }
     }
 }
