@@ -41,6 +41,7 @@ public class EditorScreen implements AppScreen {
     // Status bar cached for file-operation overlay
     private StatusBar statusBar;
     private StatusBar fileOpBar;
+    private StatusBar blockOpBar;
     // Signal to break out of main loop after file operations
     private boolean shouldQuit = false;
 
@@ -57,6 +58,13 @@ public class EditorScreen implements AppScreen {
     private int cursorRow2 = 0, cursorCol2 = 0, scrollRow2 = 0;
     private String fileName2 = "";
     private boolean insertMode2 = true;
+
+    // ---- Block markers (pane 1 live) ----
+    private int markerBeginRow = -1, markerBeginCol = 0;
+    private int markerEndRow   = -1, markerEndCol   = 0;
+    // ---- Block markers (pane 2 backing) ----
+    private int markerBeginRow2 = -1, markerBeginCol2 = 0;
+    private int markerEndRow2   = -1, markerEndCol2   = 0;
 
     public EditorScreen(String fileName) {
         this.fileName = fileName;
@@ -104,6 +112,13 @@ public class EditorScreen implements AppScreen {
                 new int[]   {  0,          9,               26,     33,     40,                 59,    65,       73,  76,  79 },
                 new String[]{ "F3 FILE:", "Exit-with-save", "Quit", "Save", "eXchange-windows", "New", "Append", "L", "W", "C" }
             );
+
+            // Block-operation overlay bar (shown while F4 mode is active)
+            blockOpBar = new StatusBar(
+                rows - 1,
+                new int[]   {  0,           11,            24,     31,     38,               53,                69,  72,  75,  79  },
+                new String[]{ "F4 BLOCK:", "Set-marker", "Copy", "Move", "Delete-block", "Remove-marker", "W", "L", "E", "F" }
+            );
                     redraw(screen);
 
             while (true) {
@@ -119,6 +134,16 @@ public class EditorScreen implements AppScreen {
                     handleFileOperation(screen, gui);
                     if (wasPane1 && splitMode) swapActivePaneData(); // restore only if still split
                     if (shouldQuit) break;
+                    redraw(screen);
+                    continue;
+                }
+
+                // F4 — enter block operation mode
+                if (type == KeyType.F4) {
+                    boolean wasPane1 = splitMode && activePane == 1;
+                    if (wasPane1) swapActivePaneData();
+                    handleBlockOperation(screen);
+                    if (wasPane1 && splitMode) swapActivePaneData();
                     redraw(screen);
                     continue;
                 }
@@ -328,13 +353,8 @@ public class EditorScreen implements AppScreen {
         if (!splitMode) {
             // ---- Single-pane mode ----
             int textRows = rows - 1;
-            for (int r = 0; r < textRows; r++) {
-                int docRow = r + scrollRow;
-                String text = (docRow < lines.size()) ? lines.get(docRow).toString() : "";
-                String padded = String.format("%-" + cols + "s",
-                        text.length() > cols ? text.substring(0, cols) : text);
-                tg.putString(0, r, padded);
-            }
+            drawTextPane(tg, lines, scrollRow, 0, textRows, cols,
+                    markerBeginRow, markerBeginCol, markerEndRow, markerEndCol);
             updateStatusBar();
             statusBar.render(screen);
             int screenRow = cursorRow - scrollRow;
@@ -342,26 +362,15 @@ public class EditorScreen implements AppScreen {
             screen.setCursorPosition(new TerminalPosition(screenCol, screenRow));
         } else {
             // ---- Split-pane mode ----
-            // Pane 1 always in lines / cursorRow / scrollRow (after any swap-back)
-            for (int r = 0; r < 12; r++) {
-                int docRow = r + scrollRow;
-                String text = (docRow < lines.size()) ? lines.get(docRow).toString() : "";
-                String padded = String.format("%-" + cols + "s",
-                        text.length() > cols ? text.substring(0, cols) : text);
-                tg.putString(0, r, padded);
-            }
+            drawTextPane(tg, lines, scrollRow, 0, 12, cols,
+                    markerBeginRow, markerBeginCol, markerEndRow, markerEndCol);
             // Status bar at row 12
             updateStatusBar();
             statusBar.render(screen);
             // Pane 2 always in lines2 / cursorRow2 / scrollRow2
             int pane2Rows = rows - 13;
-            for (int r = 0; r < pane2Rows; r++) {
-                int docRow = r + scrollRow2;
-                String text = (docRow < lines2.size()) ? lines2.get(docRow).toString() : "";
-                String padded = String.format("%-" + cols + "s",
-                        text.length() > cols ? text.substring(0, cols) : text);
-                tg.putString(0, 13 + r, padded);
-            }
+            drawTextPane(tg, lines2, scrollRow2, 13, pane2Rows, cols,
+                    markerBeginRow2, markerBeginCol2, markerEndRow2, markerEndCol2);
             // Cursor in the active pane
             if (activePane == 0) {
                 int screenRow = Math.min(cursorRow - scrollRow, 11);
@@ -374,6 +383,69 @@ public class EditorScreen implements AppScreen {
             }
         }
         screen.refresh();
+    }
+
+    /**
+     * Draw one pane's text with optional block-marker highlighting. No square characters.
+     * - One marker set: the character under the marker is shown with yellow background.
+     * - Both markers set: the whole region is shown with cyan background; the first and
+     *   last characters of the selection keep a yellow background to mark the boundaries.
+     */
+    private void drawTextPane(TextGraphics tg,
+                               List<StringBuilder> paneLines, int paneScroll,
+                               int screenRowStart, int screenRowCount, int cols,
+                               int bRow, int bCol, int eRow, int eCol) {
+        boolean hasFull  = bRow >= 0 && eRow >= 0;
+        boolean hasBegin = bRow >= 0;
+
+        for (int r = 0; r < screenRowCount; r++) {
+            int docRow = r + paneScroll;
+            String text = (docRow < paneLines.size()) ? paneLines.get(docRow).toString() : "";
+            String padded = String.format("%-" + cols + "s",
+                    text.length() > cols ? text.substring(0, cols) : text);
+            int screenRow = screenRowStart + r;
+
+            if (!hasFull) {
+                // Plain drawing with optional single-marker highlight
+                tg.setForegroundColor(TextColor.ANSI.WHITE);
+                tg.setBackgroundColor(TextColor.ANSI.BLACK);
+                tg.putString(0, screenRow, padded);
+                if (hasBegin && docRow == bRow && bCol < cols) {
+                    tg.setForegroundColor(TextColor.ANSI.BLACK);
+                    tg.setBackgroundColor(TextColor.ANSI.YELLOW);
+                    tg.putString(bCol, screenRow, String.valueOf(padded.charAt(bCol)));
+                }
+            } else {
+                // Char-by-char: block region = cyan, boundary chars = yellow
+                for (int c = 0; c < cols; c++) {
+                    boolean inBlock;
+                    if (docRow < bRow || docRow > eRow) {
+                        inBlock = false;
+                    } else if (docRow == bRow && docRow == eRow) {
+                        inBlock = c >= bCol && c < eCol;
+                    } else if (docRow == bRow) {
+                        inBlock = c >= bCol;
+                    } else if (docRow == eRow) {
+                        inBlock = c < eCol;
+                    } else {
+                        inBlock = true;
+                    }
+
+                    // Boundary: first char of selection (bRow/bCol) or last char (eRow/eCol-1)
+                    boolean isBeginChar = docRow == bRow && c == bCol;
+                    boolean isEndChar   = docRow == eRow && c == eCol - 1 && eCol > bCol || // same-row guard
+                                         docRow == eRow && c == eCol - 1 && !(docRow == bRow && eCol <= bCol);
+
+                    TextColor bg = inBlock
+                            ? (isBeginChar || isEndChar ? TextColor.ANSI.YELLOW : TextColor.ANSI.CYAN)
+                            : TextColor.ANSI.BLACK;
+                    TextColor fg = inBlock ? TextColor.ANSI.BLACK : TextColor.ANSI.WHITE;
+                    tg.setForegroundColor(fg);
+                    tg.setBackgroundColor(bg);
+                    tg.putString(c, screenRow, String.valueOf(padded.charAt(c)));
+                }
+            }
+        }
     }
 
     private void updateStatusBar() {
@@ -392,6 +464,222 @@ public class EditorScreen implements AppScreen {
         statusBar.setLabel(2, name);
         statusBar.setLabel(3, im ? "Insert " : "Replace");
         statusBar.setLabel(4, wordWrap ? "WW=On " : "WW=Off");
+    }
+
+    private void handleBlockOperation(Screen screen) throws IOException {
+        // Move the block bar to the correct row before rendering
+        blockOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
+        blockOpBar.render(screen);
+        screen.refresh();
+
+        KeyStroke key = screen.readInput();
+        if (key.getKeyType() != KeyType.Character) return;
+
+        switch (Character.toLowerCase(key.getCharacter())) {
+            case 's' -> blockSetMarker();
+            case 'r' -> blockRemoveMarkers();
+            case 'd' -> blockDelete();
+            case 'c' -> blockCopy();
+            case 'm' -> blockMove();
+            case 'w' -> blockCopyFromOtherPane();
+            case 'l' -> blockMarkLine();
+            case 'e' -> blockMarkToLineEnd();
+            case 'f' -> blockFindNext();
+            default  -> { /* cancel */ }
+        }
+    }
+
+    // ------------------------------------------------------------------ block helpers
+
+    private boolean hasFullMarkers() {
+        return markerBeginRow >= 0 && markerEndRow >= 0;
+    }
+
+    private void normalizeMarkers() {
+        if (!hasFullMarkers()) return;
+        boolean beginAfterEnd = markerBeginRow > markerEndRow
+                || (markerBeginRow == markerEndRow && markerBeginCol > markerEndCol);
+        if (beginAfterEnd) {
+            int tr = markerBeginRow; markerBeginRow = markerEndRow; markerEndRow = tr;
+            int tc = markerBeginCol; markerBeginCol = markerEndCol; markerEndCol = tc;
+        }
+    }
+
+    /** F4-S: first press = begin marker, second press = end marker, third = restart. */
+    private void blockSetMarker() {
+        if (markerBeginRow < 0) {
+            markerBeginRow = cursorRow; markerBeginCol = cursorCol;
+        } else if (markerEndRow < 0) {
+            markerEndRow = cursorRow; markerEndCol = cursorCol;
+            normalizeMarkers();
+        } else {
+            markerBeginRow = cursorRow; markerBeginCol = cursorCol;
+            markerEndRow = -1;
+        }
+    }
+
+    /** F4-R: clear both markers. */
+    private void blockRemoveMarkers() {
+        markerBeginRow = -1; markerEndRow = -1;
+    }
+
+    /** F4-L: mark entire current line (begin of line → begin of next line). */
+    private void blockMarkLine() {
+        markerBeginRow = cursorRow; markerBeginCol = 0;
+        if (cursorRow + 1 < lines.size()) {
+            markerEndRow = cursorRow + 1; markerEndCol = 0;
+        } else {
+            markerEndRow = cursorRow; markerEndCol = lines.get(cursorRow).length();
+        }
+    }
+
+    /** F4-E: mark from cursor to end of line (no CR). */
+    private void blockMarkToLineEnd() {
+        markerBeginRow = cursorRow; markerBeginCol = cursorCol;
+        markerEndRow   = cursorRow; markerEndCol   = lines.get(cursorRow).length();
+    }
+
+    /** Extract the text between the markers as a list of strings (one per line fragment). */
+    private List<String> extractBlockContent() {
+        if (!hasFullMarkers()) return null;
+        List<String> result = new ArrayList<>();
+        if (markerBeginRow == markerEndRow) {
+            String ln = lines.get(markerBeginRow).toString();
+            int from = Math.min(markerBeginCol, ln.length());
+            int to   = Math.min(markerEndCol,   ln.length());
+            result.add(ln.substring(from, Math.max(from, to)));
+        } else {
+            String first = lines.get(markerBeginRow).toString();
+            result.add(first.substring(Math.min(markerBeginCol, first.length())));
+            for (int r = markerBeginRow + 1; r < markerEndRow; r++) {
+                result.add(lines.get(r).toString());
+            }
+            if (markerEndRow < lines.size()) {
+                String last = lines.get(markerEndRow).toString();
+                result.add(last.substring(0, Math.min(markerEndCol, last.length())));
+            }
+        }
+        return result;
+    }
+
+    /** Delete the block content in-place; cursor moves to begin marker; markers cleared. */
+    private void deleteBlockContent() {
+        if (!hasFullMarkers()) return;
+        if (markerBeginRow == markerEndRow) {
+            StringBuilder ln = lines.get(markerBeginRow);
+            int from = Math.min(markerBeginCol, ln.length());
+            int to   = Math.min(markerEndCol,   ln.length());
+            ln.delete(from, to);
+        } else {
+            String prefix = lines.get(markerBeginRow).toString()
+                    .substring(0, Math.min(markerBeginCol, lines.get(markerBeginRow).length()));
+            String suffix = (markerEndRow < lines.size())
+                    ? lines.get(markerEndRow).toString()
+                      .substring(Math.min(markerEndCol, lines.get(markerEndRow).length()))
+                    : "";
+            lines.get(markerBeginRow).setLength(0);
+            lines.get(markerBeginRow).append(prefix).append(suffix);
+            for (int r = markerEndRow; r > markerBeginRow; r--) lines.remove(r);
+        }
+        cursorRow = markerBeginRow; cursorCol = markerBeginCol;
+        markerBeginRow = -1; markerEndRow = -1;
+        clampCursor();
+    }
+
+    /** Insert block lines at (row, col); cursor lands at end of inserted text. */
+    private void insertBlockAt(int row, int col, List<String> block) {
+        if (block == null || block.isEmpty()) return;
+        StringBuilder tl = lines.get(row);
+        int safeCol = Math.min(col, tl.length());
+        String after = tl.substring(safeCol);
+        tl.setLength(safeCol);
+        if (block.size() == 1) {
+            tl.append(block.get(0)).append(after);
+            cursorRow = row; cursorCol = safeCol + block.get(0).length();
+        } else {
+            tl.append(block.get(0));
+            for (int i = 1; i < block.size() - 1; i++) {
+                lines.add(row + i, new StringBuilder(block.get(i)));
+            }
+            int lastIdx = row + block.size() - 1;
+            lines.add(lastIdx, new StringBuilder(block.get(block.size() - 1) + after));
+            cursorRow = lastIdx; cursorCol = block.get(block.size() - 1).length();
+        }
+    }
+
+    private void clampCursor() {
+        cursorRow = Math.max(0, Math.min(cursorRow, lines.size() - 1));
+        cursorCol = Math.max(0, Math.min(cursorCol, lines.get(cursorRow).length()));
+    }
+
+    /** F4-D: delete the marked block. */
+    private void blockDelete() {
+        if (!hasFullMarkers()) return;
+        saveUndo();
+        deleteBlockContent();
+    }
+
+    /** F4-C: copy block to cursor position. */
+    private void blockCopy() {
+        List<String> block = extractBlockContent();
+        if (block == null) return;
+        saveUndo();
+        insertBlockAt(cursorRow, cursorCol, block);
+    }
+
+    /** F4-M: move block to cursor position. */
+    private void blockMove() {
+        List<String> block = extractBlockContent();
+        if (block == null) return;
+        saveUndo();
+        int destRow = cursorRow, destCol = cursorCol;
+        // If destination is after the block, re-anchor after deletion
+        boolean destAfterBlock = destRow > markerEndRow
+                || (destRow == markerEndRow && destCol >= markerEndCol);
+        deleteBlockContent(); // clears markers, moves cursor to begin
+        if (destAfterBlock) {
+            destRow = cursorRow; destCol = cursorCol;
+        }
+        insertBlockAt(destRow, destCol, block);
+    }
+
+    /** F4-W: copy block marked in the OTHER pane into the current cursor position. */
+    private void blockCopyFromOtherPane() {
+        if (!splitMode || markerBeginRow2 < 0 || markerEndRow2 < 0) return;
+        saveUndo();
+        List<String> block = new ArrayList<>();
+        if (markerBeginRow2 == markerEndRow2) {
+            String ln = lines2.get(markerBeginRow2).toString();
+            int from = Math.min(markerBeginCol2, ln.length());
+            int to   = Math.min(markerEndCol2,   ln.length());
+            block.add(ln.substring(from, Math.max(from, to)));
+        } else {
+            String first = lines2.get(markerBeginRow2).toString();
+            block.add(first.substring(Math.min(markerBeginCol2, first.length())));
+            for (int r = markerBeginRow2 + 1; r < markerEndRow2; r++) {
+                block.add(lines2.get(r).toString());
+            }
+            if (markerEndRow2 < lines2.size()) {
+                String last = lines2.get(markerEndRow2).toString();
+                block.add(last.substring(0, Math.min(markerEndCol2, last.length())));
+            }
+        }
+        insertBlockAt(cursorRow, cursorCol, block);
+    }
+
+    /** F4-F: cycle cursor between begin marker and end marker. */
+    private void blockFindNext() {
+        if (markerBeginRow < 0) return;
+        boolean beforeBegin = cursorRow < markerBeginRow
+                || (cursorRow == markerBeginRow && cursorCol <= markerBeginCol);
+        if (beforeBegin) {
+            cursorRow = markerBeginRow; cursorCol = markerBeginCol;
+        } else if (markerEndRow >= 0 && (cursorRow < markerEndRow
+                || (cursorRow == markerEndRow && cursorCol <= markerEndCol))) {
+            cursorRow = markerEndRow; cursorCol = markerEndCol;
+        } else {
+            cursorRow = markerBeginRow; cursorCol = markerBeginCol; // wrap
+        }
     }
 
     private void handleFileOperation(Screen screen, MultiWindowTextGUI gui) throws IOException {
@@ -552,6 +840,10 @@ public class EditorScreen implements AppScreen {
         tmp = scrollRow;  scrollRow  = scrollRow2;  scrollRow2  = tmp;
         boolean tmpB = insertMode; insertMode = insertMode2; insertMode2 = tmpB;
         String tmpS = activeFileName; activeFileName = fileName2; fileName2 = tmpS;
+        tmp = markerBeginRow; markerBeginRow = markerBeginRow2; markerBeginRow2 = tmp;
+        tmp = markerBeginCol; markerBeginCol = markerBeginCol2; markerBeginCol2 = tmp;
+        tmp = markerEndRow;   markerEndRow   = markerEndRow2;   markerEndRow2   = tmp;
+        tmp = markerEndCol;   markerEndCol   = markerEndCol2;   markerEndCol2   = tmp;
     }
 
     /** Draw the split-mode filename-entry UI and load the second file. */
