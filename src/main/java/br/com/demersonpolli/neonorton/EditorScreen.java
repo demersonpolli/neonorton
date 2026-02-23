@@ -43,6 +43,10 @@ public class EditorScreen implements AppScreen {
     // Signal to break out of main loop after file operations
     private boolean shouldQuit = false;
 
+    // Single-level undo snapshot for delete commands
+    private List<String> undoLines = null;
+    private int undoRow = 0, undoCol = 0;
+
     public EditorScreen(String fileName) {
         this.fileName = fileName;
         if (!fileName.isEmpty()) {
@@ -130,13 +134,30 @@ public class EditorScreen implements AppScreen {
 
         switch (type) {
             case Character -> {
-                StringBuilder line = lines.get(cursorRow);
-                if (insertMode || cursorCol >= line.length()) {
-                    line.insert(cursorCol, key.getCharacter());
+                char ch = key.getCharacter();
+                if (key.isCtrlDown()) {
+                    switch (Character.toLowerCase(ch)) {
+                        case 'w' -> deleteWordLeft();
+                        case 'l' -> deleteToLineBegin();
+                        case 'u' -> undoLastDelete();
+                        default  -> {}
+                    }
+                } else if (key.isAltDown()) {
+                    switch (Character.toLowerCase(ch)) {
+                        case 'w' -> deleteWordRight();
+                        case 'l' -> deleteToLineEnd();
+                        case 'k' -> killLine();
+                        default  -> {}
+                    }
                 } else {
-                    line.setCharAt(cursorCol, key.getCharacter());
+                    StringBuilder line = lines.get(cursorRow);
+                    if (insertMode || cursorCol >= line.length()) {
+                        line.insert(cursorCol, ch);
+                    } else {
+                        line.setCharAt(cursorCol, ch);
+                    }
+                    cursorCol++;
                 }
-                cursorCol++;
             }
             case Insert -> insertMode = !insertMode;
             case Enter -> {
@@ -148,6 +169,7 @@ public class EditorScreen implements AppScreen {
                 cursorCol = 0;
             }
             case Backspace -> {
+                saveUndo();
                 if (cursorCol > 0) {
                     lines.get(cursorRow).deleteCharAt(cursorCol - 1);
                     cursorCol--;
@@ -159,6 +181,7 @@ public class EditorScreen implements AppScreen {
                 }
             }
             case Delete -> {
+                saveUndo();
                 StringBuilder line = lines.get(cursorRow);
                 if (cursorCol < line.length()) {
                     line.deleteCharAt(cursorCol);
@@ -326,8 +349,76 @@ public class EditorScreen implements AppScreen {
         }
     }
 
-    private void saveFile() {
-        if (fileName.isEmpty()) return;
+    // ------------------------------------------------------------------ delete helpers
+
+    private void saveUndo() {
+        undoLines = new ArrayList<>();
+        for (StringBuilder sb : lines) undoLines.add(sb.toString());
+        undoRow = cursorRow;
+        undoCol = cursorCol;
+    }
+
+    private void undoLastDelete() {
+        if (undoLines == null) return;
+        lines.clear();
+        for (String s : undoLines) lines.add(new StringBuilder(s));
+        cursorRow = Math.min(undoRow, lines.size() - 1);
+        cursorCol = Math.min(undoCol, lines.get(cursorRow).length());
+        undoLines = null;
+    }
+
+    /** Ctrl+W – delete one word to the left */
+    private void deleteWordLeft() {
+        saveUndo();
+        if (cursorCol == 0) return;
+        String s = lines.get(cursorRow).toString();
+        int c = cursorCol - 1;
+        while (c > 0 && !Character.isLetterOrDigit(s.charAt(c))) c--;
+        while (c > 0 && Character.isLetterOrDigit(s.charAt(c - 1))) c--;
+        lines.get(cursorRow).delete(c, cursorCol);
+        cursorCol = c;
+    }
+
+    /** Alt+W – delete one word to the right */
+    private void deleteWordRight() {
+        saveUndo();
+        String s = lines.get(cursorRow).toString();
+        int len = s.length();
+        if (cursorCol >= len) return;
+        int c = cursorCol;
+        while (c < len && !Character.isLetterOrDigit(s.charAt(c))) c++;
+        while (c < len && Character.isLetterOrDigit(s.charAt(c))) c++;
+        lines.get(cursorRow).delete(cursorCol, c);
+    }
+
+    /** Ctrl+L – delete from cursor to beginning of line */
+    private void deleteToLineBegin() {
+        saveUndo();
+        lines.get(cursorRow).delete(0, cursorCol);
+        cursorCol = 0;
+    }
+
+    /** Alt+L – delete from cursor to end of line */
+    private void deleteToLineEnd() {
+        saveUndo();
+        StringBuilder line = lines.get(cursorRow);
+        line.delete(cursorCol, line.length());
+    }
+
+    /** Alt+K – delete the entire current line */
+    private void killLine() {
+        saveUndo();
+        if (lines.size() == 1) {
+            lines.get(0).setLength(0);
+            cursorCol = 0;
+        } else {
+            lines.remove(cursorRow);
+            if (cursorRow >= lines.size()) cursorRow = lines.size() - 1;
+            cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
+        }
+    }
+
+    private void saveFile() {        if (fileName.isEmpty()) return;
         try {
             Path path = Paths.get(fileName);
             List<String> content = new ArrayList<>();
