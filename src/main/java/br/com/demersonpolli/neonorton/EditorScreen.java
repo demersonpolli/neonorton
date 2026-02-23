@@ -42,6 +42,8 @@ public class EditorScreen implements AppScreen {
     private StatusBar statusBar;
     private StatusBar fileOpBar;
     private StatusBar blockOpBar;
+    private StatusBar formatOpBar;
+    private StatusBar miscOpBar;
     // Signal to break out of main loop after file operations
     private boolean shouldQuit = false;
 
@@ -119,6 +121,20 @@ public class EditorScreen implements AppScreen {
                 new int[]   {  0,           11,            24,     31,     38,               53,                69,  72,  75,  79  },
                 new String[]{ "F4 BLOCK:", "Set-marker", "Copy", "Move", "Delete-block", "Remove-marker", "W", "L", "E", "F" }
             );
+
+            // Format-operation overlay bar (shown while F5 mode is active)
+            formatOpBar = new StatusBar(
+                rows - 1,
+                new int[]   {  0,            12,                  31,             45,          57,  60,  63,  66,  69,  72  },
+                new String[]{ "F5 FORMAT:", "Format-paragraph", "Line-length", "Word-wrap", "T", "C", "D", "I", "S", "K" }
+            );
+
+            // Miscellaneous overlay bar (shown while F6 mode is active)
+            miscOpBar = new StatusBar(
+                rows - 1,
+                new int[]   {  0,          10,                  30,                46,             61,               79  },
+                new String[]{ "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "C" }
+            );
                     redraw(screen);
 
             while (true) {
@@ -143,6 +159,26 @@ public class EditorScreen implements AppScreen {
                     boolean wasPane1 = splitMode && activePane == 1;
                     if (wasPane1) swapActivePaneData();
                     handleBlockOperation(screen);
+                    if (wasPane1 && splitMode) swapActivePaneData();
+                    redraw(screen);
+                    continue;
+                }
+
+                // F5 — enter format operation mode
+                if (type == KeyType.F5) {
+                    boolean wasPane1 = splitMode && activePane == 1;
+                    if (wasPane1) swapActivePaneData();
+                    handleFormatOperation(screen);
+                    if (wasPane1 && splitMode) swapActivePaneData();
+                    redraw(screen);
+                    continue;
+                }
+
+                // F6 — enter miscellaneous operation mode
+                if (type == KeyType.F6) {
+                    boolean wasPane1 = splitMode && activePane == 1;
+                    if (wasPane1) swapActivePaneData();
+                    handleMiscOperation(screen);
                     if (wasPane1 && splitMode) swapActivePaneData();
                     redraw(screen);
                     continue;
@@ -464,6 +500,46 @@ public class EditorScreen implements AppScreen {
         statusBar.setLabel(2, name);
         statusBar.setLabel(3, im ? "Insert " : "Replace");
         statusBar.setLabel(4, wordWrap ? "WW=On " : "WW=Off");
+    }
+
+    private void handleMiscOperation(Screen screen) throws IOException {
+        miscOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
+        miscOpBar.render(screen);
+        screen.refresh();
+
+        KeyStroke key = screen.readInput();
+        if (key.getKeyType() != KeyType.Character) return;
+
+        switch (Character.toLowerCase(key.getCharacter())) {
+            case 'g' -> { /* TODO: Go-to-line-number */ }
+            case 'm' -> { /* TODO: Match-bracket */ }
+            case 't' -> { /* TODO: Text-compare */ }
+            case 'i' -> { /* TODO: INS-overstrike */ }
+            case 'c' -> { /* TODO: C */ }
+            default  -> { /* cancel */ }
+        }
+    }
+
+    private void handleFormatOperation(Screen screen) throws IOException {
+        formatOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
+        formatOpBar.render(screen);
+        screen.refresh();
+
+        KeyStroke key = screen.readInput();
+        if (key.getKeyType() != KeyType.Character) return;
+
+        switch (Character.toLowerCase(key.getCharacter())) {
+            case 'f' -> { /* TODO: Format-paragraph */ }
+            case 'l' -> { /* TODO: Line-length */ }
+            case 'w' -> { /* TODO: Word-wrap */ }
+            case 't' -> { /* TODO: T */ }
+            case 'c' -> { /* TODO: C */ }
+            case 'd' -> { /* TODO: D */ }
+            case 'i' -> { /* TODO: I */ }
+            case 's' -> { /* TODO: S */ }
+            case 'k' -> { /* TODO: K */ }
+            default  -> { /* cancel */ }
+        }
     }
 
     private void handleBlockOperation(Screen screen) throws IOException {
