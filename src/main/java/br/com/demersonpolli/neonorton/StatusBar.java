@@ -8,7 +8,7 @@ import java.io.IOException;
 
 public class StatusBar {
 
-    private final int row;
+    private int row;
     private final int[] columns;
     private final String[] labels;
 
@@ -22,6 +22,16 @@ public class StatusBar {
         this.row     = row;
         this.columns = columns;
         this.labels  = labels;
+    }
+
+    /** Move the bar to a different screen row (used when switching between single/split mode). */
+    public void setRow(int row) { this.row = row; }
+
+    /** Update a column position at runtime (e.g. re-centre a filename label). */
+    public void setColumn(int index, int col) {
+        if (index >= 0 && index < columns.length) {
+            columns[index] = col;
+        }
     }
 
     /** Update a label at runtime (e.g. show current line number). */
