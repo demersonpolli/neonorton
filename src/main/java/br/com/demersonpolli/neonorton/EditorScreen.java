@@ -167,20 +167,51 @@ public class EditorScreen implements AppScreen {
                 }
             }
             case ArrowLeft -> {
-                if (cursorCol > 0) {
-                    cursorCol--;
-                } else if (cursorRow > 0) {
-                    cursorRow--;
-                    cursorCol = lines.get(cursorRow).length();
+                if (key.isCtrlDown()) {
+                    // Ctrl+Left: move to start of previous word
+                    if (cursorCol > 0) {
+                        int c = cursorCol - 1;
+                        String s = lines.get(cursorRow).toString();
+                        // skip non-word chars, then skip word chars
+                        while (c > 0 && !Character.isLetterOrDigit(s.charAt(c))) c--;
+                        while (c > 0 && Character.isLetterOrDigit(s.charAt(c - 1))) c--;
+                        cursorCol = c;
+                    } else if (cursorRow > 0) {
+                        cursorRow--;
+                        cursorCol = lines.get(cursorRow).length();
+                    }
+                } else {
+                    if (cursorCol > 0) {
+                        cursorCol--;
+                    } else if (cursorRow > 0) {
+                        cursorRow--;
+                        cursorCol = lines.get(cursorRow).length();
+                    }
                 }
             }
             case ArrowRight -> {
-                int len = lines.get(cursorRow).length();
-                if (cursorCol < len) {
-                    cursorCol++;
-                } else if (cursorRow < lines.size() - 1) {
-                    cursorRow++;
-                    cursorCol = 0;
+                if (key.isCtrlDown()) {
+                    // Ctrl+Right: move to start of next word
+                    String s = lines.get(cursorRow).toString();
+                    int len = s.length();
+                    if (cursorCol < len) {
+                        int c = cursorCol;
+                        // skip current word chars, then skip non-word chars
+                        while (c < len && Character.isLetterOrDigit(s.charAt(c))) c++;
+                        while (c < len && !Character.isLetterOrDigit(s.charAt(c))) c++;
+                        cursorCol = c;
+                    } else if (cursorRow < lines.size() - 1) {
+                        cursorRow++;
+                        cursorCol = 0;
+                    }
+                } else {
+                    int len = lines.get(cursorRow).length();
+                    if (cursorCol < len) {
+                        cursorCol++;
+                    } else if (cursorRow < lines.size() - 1) {
+                        cursorRow++;
+                        cursorCol = 0;
+                    }
                 }
             }
             case ArrowUp -> {
@@ -195,9 +226,33 @@ public class EditorScreen implements AppScreen {
                     cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
                 }
             }
-            case Home -> cursorCol = 0;
-            case End  -> cursorCol = lines.get(cursorRow).length();
-            default   -> {}
+            case Home -> {
+                if (key.isCtrlDown()) {
+                    // Ctrl+Home: beginning of file
+                    cursorRow = 0;
+                    cursorCol = 0;
+                } else {
+                    cursorCol = 0;
+                }
+            }
+            case End -> {
+                if (key.isCtrlDown()) {
+                    // Ctrl+End: end of file
+                    cursorRow = lines.size() - 1;
+                    cursorCol = lines.get(cursorRow).length();
+                } else {
+                    cursorCol = lines.get(cursorRow).length();
+                }
+            }
+            case PageUp -> {
+                cursorRow = Math.max(0, cursorRow - textRows);
+                cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
+            }
+            case PageDown -> {
+                cursorRow = Math.min(lines.size() - 1, cursorRow + textRows);
+                cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
+            }
+            default -> {}
         }
 
         // Clamp horizontal cursor
