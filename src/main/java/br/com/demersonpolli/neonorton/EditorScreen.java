@@ -105,45 +105,45 @@ public class EditorScreen implements AppScreen {
             // Normal status bar
             statusBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,        11,         centerCol,    58,         67       },
+                new int[]   {  0,        11,     centerCol,   58,       67       },
                 new String[]{ "Line=1", "Col=1", displayName, "Insert", "WW=Off" }
             );
 
             // File-operation overlay bar (shown while F3 mode is active)
             fileOpBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,          9,               26,     33,     40,                 59,    65,       73,  76,  79 },
-                new String[]{ "F3 FILE:", "Exit-with-save", "Quit", "Save", "eXchange-windows", "New", "Append", "L", "W", "C" }
+                new int[]    { 0,          9,                26,     33,     40,                 59,    65,       73,  76,  79  },
+                new String[] { "F3 FILE:", "Exit-with-save", "Quit", "Save", "eXchange-windows", "New", "Append", "L", "W", "C" }
             );
 
             // Block-operation overlay bar (shown while F4 mode is active)
             blockOpBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,           11,            24,     31,     38,               53,                69,  72,  75,  79  },
-                new String[]{ "F4 BLOCK:", "Set-marker", "Copy", "Move", "Delete-block", "Remove-marker", "W", "L", "E", "F" }
+                new int[]    { 0,           11,           24,     31,     38,             53,              69,  72,  75,  79  },
+                new String[] { "F4 BLOCK:", "Set-marker", "Copy", "Move", "Delete-block", "Remove-marker", "W", "L", "E", "F" }
             );
 
             // Format-operation overlay bar (shown while F5 mode is active)
             formatOpBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,            12,                  31,             45,          57,  60,  63,  66,  69,  72  },
-                new String[]{ "F5 FORMAT:", "Format-paragraph", "Line-length", "Word-wrap", "T", "C", "D", "I", "S", "K" }
+                new int[]    { 0,            12,                 31,            45,          57,  60,  63,  66,  69,  72  },
+                new String[] { "F5 FORMAT:", "Format-paragraph", "Line-length", "Word-wrap", "T", "C", "D", "I", "S", "K" }
             );
 
             // Miscellaneous overlay bar (shown while F6 mode is active)
             miscOpBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,          10,                  30,                46,             61,               79  },
-                new String[]{ "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "C" }
+                new int[]    { 0,          10,                  30,              46,             61,               79  },
+                new String[] { "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "C" }
             );
 
             // Print overlay bar (shown while F7 mode is active)
             printOpBar = new StatusBar(
                 rows - 1,
-                new int[]   {  0,              13,             25,              39,             52,                    73       },
-                new String[]{ "F7 PRINTER:", "Print-all", "Block-print", "Eject-page", "Set-lines-per-page", "Margin" }
+                new int[]    {  0,            13,          25,            39,           52,                   73       },
+                new String[] { "F7 PRINTER:", "Print-all", "Block-print", "Eject-page", "Set-lines-per-page", "Margin" }
             );
-                    redraw(screen);
+            redraw(screen);
 
             while (true) {
                 KeyStroke key = screen.readInput();
