@@ -44,6 +44,7 @@ public class EditorScreen implements AppScreen {
     private StatusBar blockOpBar;
     private StatusBar formatOpBar;
     private StatusBar miscOpBar;
+    private StatusBar printOpBar;
     // Signal to break out of main loop after file operations
     private boolean shouldQuit = false;
 
@@ -135,6 +136,13 @@ public class EditorScreen implements AppScreen {
                 new int[]   {  0,          10,                  30,                46,             61,               79  },
                 new String[]{ "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "C" }
             );
+
+            // Print overlay bar (shown while F7 mode is active)
+            printOpBar = new StatusBar(
+                rows - 1,
+                new int[]   {  0,              13,             25,              39,             52,                    73       },
+                new String[]{ "F7 PRINTER:", "Print-all", "Block-print", "Eject-page", "Set-lines-per-page", "Margin" }
+            );
                     redraw(screen);
 
             while (true) {
@@ -184,9 +192,31 @@ public class EditorScreen implements AppScreen {
                     continue;
                 }
 
+                // F7 — enter print operation mode
+                if (type == KeyType.F7) {
+                    boolean wasPane1 = splitMode && activePane == 1;
+                    if (wasPane1) swapActivePaneData();
+                    handlePrintOperation(screen);
+                    if (wasPane1 && splitMode) swapActivePaneData();
+                    redraw(screen);
+                    continue;
+                }
+
                 // F1 — help
                 if (type == KeyType.F1) {
                     new HelpScreen().show(gui);
+                    redraw(screen);
+                    continue;
+                }
+
+                // F2 — status screen
+                if (type == KeyType.F2) {
+                    String fn  = (splitMode && activePane == 1) ? fileName2    : activeFileName;
+                    int    lc  = (splitMode && activePane == 1) ? lines2.size(): lines.size();
+                    int    cr  = (splitMode && activePane == 1) ? cursorRow2   : cursorRow;
+                    int    cc  = (splitMode && activePane == 1) ? cursorCol2   : cursorCol;
+                    boolean im = (splitMode && activePane == 1) ? insertMode2  : insertMode;
+                    new StatusScreen(fn, lc, cr, cc, im, wordWrap).show(gui);
                     redraw(screen);
                     continue;
                 }
@@ -228,6 +258,7 @@ public class EditorScreen implements AppScreen {
                         case 'w' -> deleteWordLeft();
                         case 'l' -> deleteToLineBegin();
                         case 'u' -> undoLastDelete();
+                        case 'v' -> toggleCaseToLineBegin();
                         default  -> {}
                     }
                 } else if (key.isAltDown()) {
@@ -235,6 +266,7 @@ public class EditorScreen implements AppScreen {
                         case 'w' -> deleteWordRight();
                         case 'l' -> deleteToLineEnd();
                         case 'k' -> killLine();
+                        case 'v' -> toggleCaseToLineEnd();
                         default  -> {}
                     }
                 } else {
@@ -247,7 +279,7 @@ public class EditorScreen implements AppScreen {
                     cursorCol++;
                 }
             }
-            case Insert -> insertMode = !insertMode;
+            case Insert -> insertMode = true;
             case Enter -> {
                 StringBuilder current = lines.get(cursorRow);
                 StringBuilder newLine = new StringBuilder(current.substring(cursorCol));
@@ -502,18 +534,180 @@ public class EditorScreen implements AppScreen {
         statusBar.setLabel(4, wordWrap ? "WW=On " : "WW=Off");
     }
 
-    private void handleMiscOperation(Screen screen) throws IOException {
-        miscOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
-        miscOpBar.render(screen);
+    private void handlePrintOperation(Screen screen) throws IOException {
+        printOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
+        printOpBar.render(screen);
         screen.refresh();
 
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
         switch (Character.toLowerCase(key.getCharacter())) {
-            case 'g' -> { /* TODO: Go-to-line-number */ }
-            case 'm' -> { /* TODO: Match-bracket */ }
-            case 't' -> { /* TODO: Text-compare */ }
+            case 'p' -> { /* TODO: Print-all */ }
+            case 'b' -> { /* TODO: Block-print */ }
+            case 'e' -> { /* TODO: Eject-page */ }
+            case 's' -> { /* TODO: Set-lines-per-page */ }
+            case 'm' -> { /* TODO: Margin */ }
+            default  -> { /* cancel */ }
+        }
+    }
+
+    /** Compare active pane vs other pane starting from their respective cursors.
+     *  On first difference: jump the OTHER pane's cursor there and switch active pane.
+     *  No-op if not in split mode or no difference found.
+     */
+    private void textCompare() {
+        if (!splitMode) return;
+        // Inside handleMiscOperation: lines/cursorRow/cursorCol = active pane,
+        //                             lines2/cursorRow2/cursorCol2 = other pane.
+        int rowA = cursorRow,  colA = cursorCol;
+        int rowB = cursorRow2, colB = cursorCol2;
+
+        while (true) {
+            // Read next char from each pane: -1 = past EOF, '\n' = end of line
+            int chA, chB;
+            if (rowA < lines.size()) {
+                String ln = lines.get(rowA).toString();
+                chA = (colA < ln.length()) ? ln.charAt(colA) : '\n';
+            } else chA = -1;
+
+            if (rowB < lines2.size()) {
+                String ln = lines2.get(rowB).toString();
+                chB = (colB < ln.length()) ? ln.charAt(colB) : '\n';
+            } else chB = -1;
+
+            if (chA == -1 && chB == -1) return; // identical from cursors onward
+
+            if (chA != chB) {
+                // Move other pane's cursor to the diff position
+                if (rowB < lines2.size()) {
+                    cursorRow2 = rowB;
+                    cursorCol2 = Math.min(colB, lines2.get(rowB).length());
+                } else {
+                    cursorRow2 = Math.max(0, lines2.size() - 1);
+                    cursorCol2 = 0;
+                }
+                // Adjust other pane's scroll so the diff line is visible at the top
+                scrollRow2 = cursorRow2;
+                // Switch to the other pane
+                activePane = 1 - activePane;
+                return;
+            }
+
+            // Advance both cursors
+            if (chA == '\n') { rowA++; colA = 0; } else colA++;
+            if (chB == '\n') { rowB++; colB = 0; } else colB++;
+        }
+    }
+
+    private void matchBracket() {
+        if (cursorRow >= lines.size()) return;
+        String line = lines.get(cursorRow).toString();
+        if (cursorCol >= line.length()) return;
+        char ch = line.charAt(cursorCol);
+
+        final String OPEN  = "([{<";
+        final String CLOSE = ")]}>";
+        int idx = OPEN.indexOf(ch);
+        boolean searchForward = idx >= 0;
+        if (!searchForward) {
+            idx = CLOSE.indexOf(ch);
+            if (idx < 0) return; // not a bracket char
+        }
+        char open  = OPEN.charAt(idx);
+        char close = CLOSE.charAt(idx);
+
+        int depth = 0;
+        if (searchForward) {
+            for (int r = cursorRow; r < lines.size(); r++) {
+                String ln = lines.get(r).toString();
+                int startC = (r == cursorRow) ? cursorCol : 0;
+                for (int c = startC; c < ln.length(); c++) {
+                    char cur = ln.charAt(c);
+                    if (cur == open)  depth++;
+                    else if (cur == close) {
+                        depth--;
+                        if (depth == 0) { cursorRow = r; cursorCol = c; return; }
+                    }
+                }
+            }
+        } else {
+            for (int r = cursorRow; r >= 0; r--) {
+                String ln = lines.get(r).toString();
+                int startC = (r == cursorRow) ? cursorCol : ln.length() - 1;
+                for (int c = startC; c >= 0; c--) {
+                    char cur = ln.charAt(c);
+                    if (cur == close) depth++;
+                    else if (cur == open) {
+                        depth--;
+                        if (depth == 0) { cursorRow = r; cursorCol = c; return; }
+                    }
+                }
+            }
+        }
+    }
+
+    private void goToLineNumber(Screen screen) throws IOException {
+        int cols       = screen.getTerminalSize().getColumns();
+        int promptRow  = (splitMode && activePane == 1) ? 13 : 0;
+        int inputRow   = promptRow + 1;
+        int ruleRow    = promptRow + 2;
+
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, promptRow, String.format("%-" + cols + "s", "Enter line number:"));
+        tg.putString(0, inputRow,  String.format("%-" + cols + "s", ""));
+        tg.putString(0, ruleRow,   "\u2500".repeat(cols));
+        screen.setCursorPosition(new TerminalPosition(0, inputRow));
+        screen.refresh();
+
+        StringBuilder numBuilder = new StringBuilder();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return;
+            if (k.getKeyType() == KeyType.Enter)  break;
+            if (k.getKeyType() == KeyType.Backspace) {
+                if (numBuilder.length() > 0) numBuilder.deleteCharAt(numBuilder.length() - 1);
+            } else if (k.getKeyType() == KeyType.Character
+                    && !k.isCtrlDown() && !k.isAltDown()
+                    && Character.isDigit(k.getCharacter())) {
+                numBuilder.append(k.getCharacter());
+            }
+            tg.putString(0, inputRow, String.format("%-" + cols + "s", numBuilder.toString()));
+            screen.setCursorPosition(new TerminalPosition(numBuilder.length(), inputRow));
+            screen.refresh();
+        }
+
+        String txt = numBuilder.toString().trim();
+        if (txt.isEmpty()) return;
+        int target;
+        try { target = Integer.parseInt(txt); } catch (NumberFormatException e) { return; }
+        target = Math.max(1, Math.min(target, lines.size()));
+        cursorRow = target - 1;
+        cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
+        // Adjust scroll so the target line is visible
+        int visibleRows = screen.getTerminalSize().getRows() - 1 - (splitMode ? 13 : 0);
+        if (cursorRow < scrollRow) scrollRow = cursorRow;
+        else if (cursorRow >= scrollRow + visibleRows) scrollRow = cursorRow - visibleRows + 1;
+    }
+
+    private void handleMiscOperation(Screen screen) throws IOException {
+        miscOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
+        miscOpBar.render(screen);
+        screen.refresh();
+
+        KeyStroke key = screen.readInput();
+        if (key.getKeyType() == KeyType.Insert) {
+            insertMode = false;  // F6-INS = overwrite mode
+            return;
+        }
+        if (key.getKeyType() != KeyType.Character) return;
+
+        switch (Character.toLowerCase(key.getCharacter())) {
+            case 'g' -> goToLineNumber(screen);
+            case 'm' -> matchBracket();
+            case 't' -> textCompare();
             case 'i' -> { /* TODO: INS-overstrike */ }
             case 'c' -> { /* TODO: C */ }
             default  -> { /* cancel */ }
@@ -1071,6 +1265,29 @@ public class EditorScreen implements AppScreen {
             lines.remove(cursorRow);
             if (cursorRow >= lines.size()) cursorRow = lines.size() - 1;
             cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
+        }
+    }
+
+    /** Ctrl+V – toggle upper/lowercase from cursor back to beginning of line */
+    private void toggleCaseToLineBegin() {
+        if (cursorCol == 0) return;
+        StringBuilder line = lines.get(cursorRow);
+        for (int c = 0; c < cursorCol; c++) {
+            char ch = line.charAt(c);
+            line.setCharAt(c, Character.isUpperCase(ch) ? Character.toLowerCase(ch)
+                                                        : Character.toUpperCase(ch));
+        }
+    }
+
+    /** Alt+V – toggle upper/lowercase from cursor to end of line */
+    private void toggleCaseToLineEnd() {
+        StringBuilder line = lines.get(cursorRow);
+        int end = line.length();
+        if (cursorCol >= end) return;
+        for (int c = cursorCol; c < end; c++) {
+            char ch = line.charAt(c);
+            line.setCharAt(c, Character.isUpperCase(ch) ? Character.toLowerCase(ch)
+                                                        : Character.toUpperCase(ch));
         }
     }
 
