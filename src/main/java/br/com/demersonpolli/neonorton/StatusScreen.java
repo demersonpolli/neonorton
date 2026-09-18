@@ -11,6 +11,12 @@ import com.googlecode.lanterna.screen.Screen;
 
 import java.io.IOException;
 
+// TODO(spec: Formatting, status, and printer — status fields): the confirmed original status
+// display also shows output file, format line length, tab display width, print margin/page
+// lines, characters in edit buffer, unread input characters, and unused buffer/output-drive
+// space — none of which exist yet (most depend on the F5/F7/CLI features that are still
+// stubbed elsewhere). Extend the constructor/infoLines below once those fields exist rather
+// than bolting them on ad hoc; keep fileName/lineCount/cursor/insertMode/wordWrap as-is.
 public class StatusScreen implements AppScreen {
 
     private final String fileName;

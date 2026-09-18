@@ -12,6 +12,12 @@ import com.googlecode.lanterna.screen.Screen;
 
 import java.io.IOException;
 
+// TODO(spec: Global commands — "F1 paged help"): spec describes F1 as *paged* help, and its
+// help/dispatch evidence covers the full command set (search, F5 format, F7 printer, F9
+// shell, etc). This screen is a single static box covering only a small subset — acceptable
+// while those features are stubbed, but it should grow into multiple pages (PgUp/PgDn or
+// next/prev key to page through them) as each command family above gets implemented, rather
+// than one ever-taller fixed box.
 public class HelpScreen implements AppScreen {
 
     private static final String[] HELP_LINES = {

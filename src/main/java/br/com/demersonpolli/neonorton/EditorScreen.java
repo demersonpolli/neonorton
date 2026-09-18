@@ -16,6 +16,29 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
+/*
+ * NE 1.3C compliance status (see "Norton Editor 1.3C: white-box reconstruction
+ * specification"). Compliant: cursor family, Backspace/Del/Ctrl-W/Alt-W/Ctrl-L/
+ * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
+ * behavior. Not yet compliant, see TODOs at each site below:
+ *   - Search & replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive,
+ *     Y / N / star (replace all) / Space replace flow) is entirely unimplemented
+ *     — no keys wired.
+ *   - F5 Format, F7 Printer: overlay bars exist but every command is a stub.
+ *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
+ *   - F9 DOS/shell command processor is not implemented.
+ *   - Ctrl-P (insert control/extended byte) is not implemented.
+ *   - Tab key inserts nothing in single-pane mode (only repurposed for pane
+ *     switch in split mode) — none of the spec's 3 tab modes exist.
+ *   - Undo is single-level and only snapshotted around delete-class ops, not
+ *     an unbounded stack covering every insert/delete/replace transaction.
+ *   - File I/O is line-based UTF-8 text (Files.readAllLines/write): no CRLF
+ *     preservation, no binary/byte-safe mode, no atomic save, no incremental
+ *     load for large files, no distinct input/output path handling.
+ *   - Main has no CLI parsing at all (+LINE, input/output paths, /DA /DB /DC).
+ *   - wordWrap field is read by the status bar but nothing ever sets it true
+ *     or wraps text on insertion (F5 W is a stub).
+ */
 public class EditorScreen implements AppScreen {
 
     private final String fileName;
@@ -259,6 +282,8 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineBegin();
                         case 'u' -> undoLastDelete();
                         case 'v' -> toggleCaseToLineBegin();
+                        // TODO(spec: Search/Global): 'f' = reverse find continue, 'c' = continue
+                        // reverse search, 'p' = insert literal/extended byte. None implemented.
                         default  -> {}
                     }
                 } else if (key.isAltDown()) {
@@ -267,6 +292,9 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineEnd();
                         case 'k' -> killLine();
                         case 'v' -> toggleCaseToLineEnd();
+                        // TODO(spec: Search): 'f' = forward find, 'c' = continue forward search.
+                        // Neither Alt-F nor Alt-C is wired; search/replace is unimplemented
+                        // end-to-end (no search-term prompt, no Y/N/*/Space replace loop).
                         default  -> {}
                     }
                 } else {
@@ -395,6 +423,13 @@ public class EditorScreen implements AppScreen {
                 cursorRow = Math.min(lines.size() - 1, cursorRow + textRows);
                 cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
             }
+            // TODO(spec: Editing semantics — tab modes): KeyType.Tab has no case here, so
+            // pressing Tab in single-pane mode does nothing (in split mode it's consumed
+            // earlier in show() to switch panes and never reaches handleKey at all). The
+            // spec requires 3 configurable tab modes selectable via F5 T: (1) insert a
+            // literal TAB byte, (2) insert spaces to the next tab stop, (3) move the cursor
+            // to the next tab stop without writing text. None exist; add a case here plus
+            // a `tabMode`/`tabWidth` field wired up by handleFormatOperation's 'T' command.
             default -> {}
         }
 
@@ -542,6 +577,16 @@ public class EditorScreen implements AppScreen {
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
+        // TODO(spec: F7 Printer ops + PrinterSink module): every command below is an
+        // unimplemented stub. Spec explicitly forbids writing to a parallel port; replace
+        // with a PrinterSink abstraction (named file / system print command / stdout) that
+        // applies left margin, page length (0 = no pagination), optional tab expansion, and
+        // supports Ctrl-C abort mid-print.
+        //   P — print the whole buffer through the sink.
+        //   B — print only the marked block (needs hasFullMarkers()); refuse without markers.
+        //   E — form-feed / eject the current page.
+        //   S — prompt for and set page length in lines (0 disables pagination).
+        //   M — prompt for and set the left margin.
         switch (Character.toLowerCase(key.getCharacter())) {
             case 'p' -> { /* TODO: Print-all */ }
             case 'b' -> { /* TODO: Block-print */ }
@@ -708,7 +753,16 @@ public class EditorScreen implements AppScreen {
             case 'g' -> goToLineNumber(screen);
             case 'm' -> matchBracket();
             case 't' -> textCompare();
+            // NOTE: this 'i' case is dead — KeyType.Insert is already intercepted above
+            // (`if (key.getKeyType() == KeyType.Insert)`) and returns before reaching this
+            // switch, which correctly implements the spec's "F6+Ins forces replace/overstrike".
+            // Typing the literal character 'i' after F6 falls into this no-op instead; remove
+            // this case (or repurpose the letter) once compliance work touches this method.
             case 'i' -> { /* TODO: INS-overstrike */ }
+            // TODO(spec: F6 Misc — Condensed display): render the buffer in a denser layout
+            // (spec doesn't recover exact column count/behavior from the listing; treat as a
+            // design choice, e.g. a narrower effective column width or smaller font hinting
+            // if the terminal backend ever supports it). Currently a no-op.
             case 'c' -> { /* TODO: C */ }
             default  -> { /* cancel */ }
         }
@@ -722,6 +776,23 @@ public class EditorScreen implements AppScreen {
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
+        // TODO(spec: F5 Format ops): every command below is an unimplemented stub. Needed:
+        //   F — reflow the current paragraph (blank-line-delimited run) at `wrapColumn`,
+        //       normalizing intra-paragraph whitespace and preserving left indent; must be
+        //       one undo transaction and must not touch marked non-text bytes.
+        //   L — prompt for and set `wrapColumn` (format/word-wrap line length).
+        //   W — toggle the `wordWrap` field (currently dead: set nowhere, read only by the
+        //       status bar) and apply wrapping as text is typed once enabled.
+        //   T — tab display width + tab mode selector (insert literal TAB / insert spaces /
+        //       move-to-stop); wires into the still-missing Tab key handling in handleKey.
+        //   C — cursor type/shape selector (block/underline/etc.) — portable design choice,
+        //       not historically recoverable; just needs a terminal cursor-style call.
+        //   D — display/color theme selector, corresponds to CLI's /DA /DB /DC.
+        //   I — toggle auto-indent (`indent` field doesn't exist yet).
+        //   S — persist current config (tab width/mode, insert-key behavior, cursor style,
+        //       theme, wrap settings, indent, print settings) to a user config file.
+        //   K — TAB/INS key-behavior configuration dialog (does Ins toggle insert/replace,
+        //       or always force insert; which of the 3 tab modes Tab uses).
         switch (Character.toLowerCase(key.getCharacter())) {
             case 'f' -> { /* TODO: Format-paragraph */ }
             case 'l' -> { /* TODO: Line-length */ }
@@ -973,8 +1044,23 @@ public class EditorScreen implements AppScreen {
                 else enterSplitMode(screen, gui);
             }
             case 'n' -> handleNewFile(screen);               // New file in pane
+            // TODO(spec: F3 File ops — Append): prompt for a path, read it, and insert its
+            // content at the cursor (spec calls this "append" but it's an insert-at-cursor
+            // of another file, not appending to the end). Reject invalid paths/read errors
+            // without mutating the document.
             case 'a' -> { /* TODO: Append file */ }
+            // TODO(spec: F3 File ops — Load more / partial load): the current loader always
+            // reads the whole file (Files.readAllLines) in the constructor and handleNewFile,
+            // so there is no notion of a partially-loaded document to begin with. Spec wants
+            // an incremental FileSource (loaded prefix + file offset + remaining count) with
+            // F3 L loading the next chunk, and operations needing unseen input refusing with
+            // "CAN'T APPEND, PORTION OF CURRENT INPUT FILE UNREAD" until it's loaded.
             case 'l' -> { /* TODO: L */ }
+            // TODO(spec: F3 File ops — Write through cursor / Close output file): write the
+            // text from the start of the buffer through the cursor to a (possibly separate)
+            // output target, without marking the whole document as saved; 'c' then closes
+            // that output target and should prompt before another is chosen. Needs the
+            // dual input/output-path model from the CLI spec, which Main.java doesn't have.
             case 'w' -> { /* TODO: W */ }
             case 'c' -> { /* TODO: C */ }
             default  -> { /* cancel */ }
@@ -1201,6 +1287,15 @@ public class EditorScreen implements AppScreen {
 
     // ------------------------------------------------------------------ delete helpers
 
+    // TODO(spec: Editing semantics — Undelete/undo): this is a single-slot snapshot
+    // (saveUndo overwrites undoLines every call, undoLastDelete consumes it once) covering
+    // only the delete-class commands that already call saveUndo(). The spec's compatible
+    // contract just says Ctrl-U maps to "undo" with unspecified depth, but its portable
+    // design choice explicitly asks for an unbounded undo STACK where every insert/delete/
+    // replace — including plain typing and Enter, which never call saveUndo() today — is
+    // one transaction. Replace this pair with an UndoStack of transactions (e.g. row-range
+    // diffs, not full-buffer string copies) and call it from every mutating handler,
+    // including handleKey's Character/Enter cases which currently have no undo support at all.
     private void saveUndo() {
         undoLines = new ArrayList<>();
         for (StringBuilder sb : lines) undoLines.add(sb.toString());
@@ -1291,6 +1386,18 @@ public class EditorScreen implements AppScreen {
         }
     }
 
+    // TODO(spec: File I/O — atomic save, binary safety, CRLF preservation, error surfacing):
+    // this method has several gaps against the "Portable contract" for file I/O:
+    //   - Files.write(path, content) writes UTF-8 text and joins lines with
+    //     System.lineSeparator(), so it can't round-trip non-UTF-8/binary content and does
+    //     not remember/preserve the source file's original newline style (the document model
+    //     itself, List<StringBuilder> lines, has already thrown that information away on
+    //     load — this is a load-bearing architectural gap, not just a save-time fix).
+    //   - Not atomic: a crash or full disk mid-write can truncate the target file. Spec wants
+    //     write-to-temp-file-in-same-directory + flush/fsync + atomic rename.
+    //   - The catch block silently swallows IOException; spec requires a clear status-line
+    //     error message (it documents specific short compatibility-style messages for I/O
+    //     failures) rather than losing the failure entirely.
     private void saveFile() {
         if (activeFileName.isEmpty()) return;
         try {
