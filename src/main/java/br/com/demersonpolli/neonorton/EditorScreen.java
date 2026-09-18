@@ -44,11 +44,17 @@ import java.util.List;
  * NE 1.3C compliance status (see "Norton Editor 1.3C: white-box reconstruction
  * specification"). Compliant: cursor family, Backspace/Del/Ctrl-W/Alt-W/Ctrl-L/
  * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
- * behavior. Not yet compliant, see TODOs at each site below:
+ * behavior, F2 status screen (see StatusScreen.StatusInfo), CLI parsing in Main
+ * (+LINE, input/output paths, /DA /DB /DC — parsed, though display mode/safe
+ * mode/encoding aren't applied to behavior yet, see Main's TODOs).
+ * Not yet compliant, see TODOs at each site below:
  *   - Search & replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive,
  *     Y / N / star (replace all) / Space replace flow) is entirely unimplemented
  *     — no keys wired.
- *   - F5 Format, F7 Printer: overlay bars exist but every command is a stub.
+ *   - F5 Format, F7 Printer: overlay bars exist but every command is a stub
+ *     (their target fields — wrapColumn/tabWidth/indent/printMarginLeft/
+ *     printPageLines/outputPath — already exist and feed the F2 status screen;
+ *     only the interactive prompts to change them are missing).
  *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
  *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
@@ -58,10 +64,9 @@ import java.util.List;
  *     an unbounded stack covering every insert/delete/replace transaction.
  *   - File I/O is line-based UTF-8 text (Files.readAllLines/write): no CRLF
  *     preservation, no binary/byte-safe mode, no atomic save, no incremental
- *     load for large files, no distinct input/output path handling.
- *   - Main has no CLI parsing at all (+LINE, input/output paths, /DA /DB /DC).
- *   - wordWrap field is read by the status bar but nothing ever sets it true
- *     or wraps text on insertion (F5 W is a stub).
+ *     load for large files.
+ *   - wordWrap field is read by the status bar/F2 screen but nothing ever sets
+ *     it true or wraps text on insertion (F5 W is a stub).
  */
 public class EditorScreen implements AppScreen {
 
@@ -81,6 +86,19 @@ public class EditorScreen implements AppScreen {
     // Editor modes
     private boolean insertMode = true;   // true = Insert, false = Replace
     private boolean wordWrap   = false;  // true = WW=On, false = WW=Off
+    private boolean indent     = false;  // F5 I: auto-indent (not yet wired to Enter)
+
+    // Format/print/tab configuration — these are the F5/F7 command targets. The fields exist
+    // now (for the F2 status screen) with sensible defaults; F5/F7 still need to let the user
+    // change them interactively, see the TODOs on their handler methods below.
+    private int wrapColumn      = 0;   // F5 L: format/word-wrap line length; 0 = off/unset
+    private int tabWidth        = 8;   // F5 T: tab display width
+    private int printMarginLeft = 0;   // F7 M: left margin for printing
+    private int printPageLines  = 0;   // F7 S: lines per printed page; 0 = no pagination
+
+    // F3 W "write through cursor" target; null means "same as activeFileName" (the CLI's
+    // default when only an input path is given). Set via setOutputPath() from Main.
+    private String outputPath = null;
 
     // Terminal width cached for status bar centering
     private int statusBarCols = 80;
@@ -145,6 +163,11 @@ public class EditorScreen implements AppScreen {
         cursorRow = Math.max(0, Math.min(line - 1, lines.size() - 1));
         cursorCol = 0;
         scrollRow = cursorRow;
+    }
+
+    /** Set the CLI's --output path (F3 W's target). Null/empty means "same as input file". */
+    public void setOutputPath(String path) {
+        this.outputPath = (path == null || path.isEmpty()) ? null : path;
     }
 
     @Override
@@ -266,12 +289,21 @@ public class EditorScreen implements AppScreen {
 
                 // F2 — status screen
                 if (type == KeyType.F2) {
-                    String fn  = (splitMode && activePane == 1) ? fileName2    : activeFileName;
-                    int    lc  = (splitMode && activePane == 1) ? lines2.size(): lines.size();
-                    int    cr  = (splitMode && activePane == 1) ? cursorRow2   : cursorRow;
-                    int    cc  = (splitMode && activePane == 1) ? cursorCol2   : cursorCol;
-                    boolean im = (splitMode && activePane == 1) ? insertMode2  : insertMode;
-                    new StatusScreen(fn, lc, cr, cc, im, wordWrap).show(gui);
+                    boolean pane2 = splitMode && activePane == 1;
+                    String fn  = pane2 ? fileName2    : activeFileName;
+                    int    lc  = pane2 ? lines2.size(): lines.size();
+                    int    cr  = pane2 ? cursorRow2   : cursorRow;
+                    int    cc  = pane2 ? cursorCol2   : cursorCol;
+                    boolean im = pane2 ? insertMode2  : insertMode;
+                    List<StringBuilder> paneLines = pane2 ? lines2 : lines;
+                    StatusScreen.StatusInfo info = new StatusScreen.StatusInfo(
+                        fn, outputPath, lc, cr, cc, im, wordWrap, indent,
+                        wrapColumn, tabWidth, printMarginLeft, printPageLines,
+                        countBufferChars(paneLines),
+                        0L, // unread input chars: always 0 until F3 L "load more" exists
+                        freeDiskSpaceBytes(fn)
+                    );
+                    new StatusScreen(info).show(gui);
                     redraw(screen);
                     continue;
                 }
@@ -314,8 +346,25 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineBegin();
                         case 'u' -> undoLastDelete();
                         case 'v' -> toggleCaseToLineBegin();
-                        // TODO(spec: Search/Global): 'f' = reverse find continue, 'c' = continue
-                        // reverse search, 'p' = insert literal/extended byte. None implemented.
+                        // TODO: Ctrl-F, reverse find (continue). Needs a new search.c-equivalent:
+                        // a `lastSearchTerm`/`lastSearchCaseSensitive` pair of fields set by a
+                        // search-entry prompt (goToLineNumber()-style single-line input, but
+                        // ESC during entry sets case-insensitive instead of canceling, and
+                        // Ctrl-Return inserts a literal newline into the term). Ctrl-F with no
+                        // prior term should prompt for one (reverse direction) and jump the
+                        // cursor to the first match at/before the cursor; show "SEARCH STRING
+                        // NOT FOUND" on failure.
+                        case 'f' -> { /* TODO: reverse find */ }
+                        // TODO: Ctrl-C, continue reverse search. Requires 'f' above to exist
+                        // first (shares `lastSearchTerm`); repeats the same reverse match
+                        // starting one position before the current cursor, non-overlapping.
+                        case 'c' -> { /* TODO: continue reverse search */ }
+                        // TODO: Ctrl-P, insert literal/extended byte. Prompt for a raw
+                        // byte/codepoint (e.g. two hex digits) and insert it directly into the
+                        // current line via `lines.get(cursorRow).insert(cursorCol, ch)` the same
+                        // way handleKey's plain Character case does, bypassing normal
+                        // printable-character filtering so control bytes can be entered.
+                        case 'p' -> { /* TODO: insert literal byte */ }
                         default  -> {}
                     }
                 } else if (key.isAltDown()) {
@@ -324,9 +373,18 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineEnd();
                         case 'k' -> killLine();
                         case 'v' -> toggleCaseToLineEnd();
-                        // TODO(spec: Search): 'f' = forward find, 'c' = continue forward search.
-                        // Neither Alt-F nor Alt-C is wired; search/replace is unimplemented
-                        // end-to-end (no search-term prompt, no Y/N/*/Space replace loop).
+                        // TODO: Alt-F, forward find. Same search-entry prompt as Ctrl-F (see its
+                        // TODO above) but scanning forward from just after the cursor; store the
+                        // term/case-sensitivity in the same `lastSearchTerm` fields so Ctrl-F,
+                        // Alt-C and Ctrl-C can all reuse it. After a match, entering find again
+                        // in the same direction with the SAME term should instead prompt for a
+                        // replacement string and start the Y/N/*/Space replace loop described in
+                        // the class-level compliance comment.
+                        case 'f' -> { /* TODO: forward find */ }
+                        // TODO: Alt-C, continue forward search. Repeats the last forward match
+                        // starting one position after the current cursor, non-overlapping with
+                        // the previous match; show "SEARCH STRING NOT FOUND" when exhausted.
+                        case 'c' -> { /* TODO: continue forward search */ }
                         default  -> {}
                     }
                 } else {
@@ -601,6 +659,28 @@ public class EditorScreen implements AppScreen {
         statusBar.setLabel(4, wordWrap ? "WW=On " : "WW=Off");
     }
 
+    /** Total character count in a buffer: line lengths plus one newline per line break. */
+    private long countBufferChars(List<StringBuilder> paneLines) {
+        long total = 0;
+        for (StringBuilder line : paneLines) total += line.length();
+        total += Math.max(0, paneLines.size() - 1);
+        return total;
+    }
+
+    /** Free space on the filesystem holding `path`; walks up to an existing ancestor if the
+     *  file itself doesn't exist yet, and falls back to the current directory. Returns -1 if
+     *  it can't be determined. */
+    private long freeDiskSpaceBytes(String path) {
+        try {
+            Path p = (path == null || path.isEmpty()) ? Paths.get(".") : Paths.get(path).toAbsolutePath();
+            while (p != null && !Files.exists(p)) p = p.getParent();
+            if (p == null) p = Paths.get(".");
+            return Files.getFileStore(p).getUsableSpace();
+        } catch (IOException e) {
+            return -1L;
+        }
+    }
+
     private void handlePrintOperation(Screen screen) throws IOException {
         printOpBar.setRow(splitMode ? 12 : screen.getTerminalSize().getRows() - 1);
         printOpBar.render(screen);
@@ -609,21 +689,33 @@ public class EditorScreen implements AppScreen {
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
-        // TODO(spec: F7 Printer ops + PrinterSink module): every command below is an
-        // unimplemented stub. Spec explicitly forbids writing to a parallel port; replace
-        // with a PrinterSink abstraction (named file / system print command / stdout) that
-        // applies left margin, page length (0 = no pagination), optional tab expansion, and
-        // supports Ctrl-C abort mid-print.
-        //   P — print the whole buffer through the sink.
-        //   B — print only the marked block (needs hasFullMarkers()); refuse without markers.
-        //   E — form-feed / eject the current page.
-        //   S — prompt for and set page length in lines (0 disables pagination).
-        //   M — prompt for and set the left margin.
+        // Printer output must go through a PrinterSink abstraction (named file / OS print
+        // command / stdout) — never a parallel port — so P/B below share one sink instance
+        // configured by the S/M commands.
         switch (Character.toLowerCase(key.getCharacter())) {
+            // TODO: Print-all. `printMarginLeft`/`printPageLines` fields already exist (set by
+            // 'm'/'s' below, and shown on F2's status screen) — open/obtain the PrinterSink,
+            // then stream every line in `lines` through it: pad each line with
+            // `printMarginLeft` spaces, expand tabs if the F5 tab-expansion-on-print option is
+            // set, and insert a form feed every `printPageLines` output lines (skip pagination
+            // entirely when it's 0). Let Ctrl-C during the loop abort and close the sink early.
             case 'p' -> { /* TODO: Print-all */ }
+            // TODO: Block-print. Call hasFullMarkers() first and show "TWO BLOCK MARKERS
+            // NEEDED" (see StatusBar/overlay pattern used elsewhere) if unset; otherwise reuse
+            // extractBlockContent() to get the marked lines and feed exactly that list through
+            // the same PrinterSink pipeline as Print-all (margin/page-length/tab rules apply
+            // identically).
             case 'b' -> { /* TODO: Block-print */ }
+            // TODO: Eject-page. Send a raw form-feed byte (0x0C) to the currently open
+            // PrinterSink; if no sink/print job is open, this is a no-op (nothing to eject).
             case 'e' -> { /* TODO: Eject-page */ }
+            // TODO: Set-lines-per-page. Reuse the goToLineNumber() digit-prompt pattern to read
+            // an integer into the existing `printPageLines` field; 0 means "no pagination" per
+            // spec (already the default). Validate non-negative; ignore/cancel on empty or
+            // non-numeric input.
             case 's' -> { /* TODO: Set-lines-per-page */ }
+            // TODO: Margin. Same digit-prompt pattern as 's' above, writing the existing
+            // `printMarginLeft` field; this many spaces get prepended to every printed line.
             case 'm' -> { /* TODO: Margin */ }
             default  -> { /* cancel */ }
         }
@@ -791,10 +883,13 @@ public class EditorScreen implements AppScreen {
             // Typing the literal character 'i' after F6 falls into this no-op instead; remove
             // this case (or repurpose the letter) once compliance work touches this method.
             case 'i' -> { /* TODO: INS-overstrike */ }
-            // TODO(spec: F6 Misc — Condensed display): render the buffer in a denser layout
-            // (spec doesn't recover exact column count/behavior from the listing; treat as a
-            // design choice, e.g. a narrower effective column width or smaller font hinting
-            // if the terminal backend ever supports it). Currently a no-op.
+            // TODO: Condensed display. Add a `condensed` boolean field; toggle it here. Wire
+            // it into drawTextPane()/redraw() to render at a denser column width (e.g. treat
+            // the pane as if `cols` were larger — skip characters or use half-width rendering
+            // if the terminal backend ever supports it) — exact column count/behavior isn't
+            // recoverable from the spec's listing, so pick a concrete number (e.g. 132 cols
+            // worth of text scaled into the real terminal width) and document it as a design
+            // choice. Reflect the state in the status bar the same way WW=On/Off is shown.
             case 'c' -> { /* TODO: C */ }
             default  -> { /* cancel */ }
         }
@@ -808,32 +903,60 @@ public class EditorScreen implements AppScreen {
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
-        // TODO(spec: F5 Format ops): every command below is an unimplemented stub. Needed:
-        //   F — reflow the current paragraph (blank-line-delimited run) at `wrapColumn`,
-        //       normalizing intra-paragraph whitespace and preserving left indent; must be
-        //       one undo transaction and must not touch marked non-text bytes.
-        //   L — prompt for and set `wrapColumn` (format/word-wrap line length).
-        //   W — toggle the `wordWrap` field (currently dead: set nowhere, read only by the
-        //       status bar) and apply wrapping as text is typed once enabled.
-        //   T — tab display width + tab mode selector (insert literal TAB / insert spaces /
-        //       move-to-stop); wires into the still-missing Tab key handling in handleKey.
-        //   C — cursor type/shape selector (block/underline/etc.) — portable design choice,
-        //       not historically recoverable; just needs a terminal cursor-style call.
-        //   D — display/color theme selector, corresponds to CLI's /DA /DB /DC.
-        //   I — toggle auto-indent (`indent` field doesn't exist yet).
-        //   S — persist current config (tab width/mode, insert-key behavior, cursor style,
-        //       theme, wrap settings, indent, print settings) to a user config file.
-        //   K — TAB/INS key-behavior configuration dialog (does Ins toggle insert/replace,
-        //       or always force insert; which of the 3 tab modes Tab uses).
         switch (Character.toLowerCase(key.getCharacter())) {
+            // TODO: Format-paragraph. Find the paragraph the cursor is in (scan up/down from
+            // cursorRow to the nearest blank line or buffer edge on each side). Join its lines
+            // into one string, collapse runs of whitespace to single spaces, then greedily
+            // rewrap at the existing `wrapColumn` field (settable via 'l' below; 0 = off, so
+            // treat 0 as "don't reflow"), re-emitting the original leading indent on every
+            // produced line. Replace the paragraph's lines in `lines` with the rewrapped ones
+            // in a single saveUndo() transaction. Must not touch a marked block
+            // (hasFullMarkers()) that overlaps — refuse or skip it if so.
             case 'f' -> { /* TODO: Format-paragraph */ }
+            // TODO: Line-length. Reuse the goToLineNumber() digit-prompt pattern to read an
+            // integer into the existing `wrapColumn` field (shared with Format-paragraph and
+            // the word-wrap-on-typing behavior below; also shown on F2's status screen).
+            // Validate > 0; ignore on cancel/empty input.
             case 'l' -> { /* TODO: Line-length */ }
+            // TODO: Word-wrap. Flip the existing `wordWrap` field (it's declared and read by
+            // updateStatusBar() already, just never toggled). Once true, handleKey's Character
+            // case must check line length against `wrapColumn` after each insertion and, when
+            // exceeded, push the trailing word down to a new line the way Enter does.
             case 'w' -> { /* TODO: Word-wrap */ }
+            // TODO: Tab display/insert mode. Prompt (goToLineNumber-style digit read) for tab
+            // width into the existing `tabWidth` field, then offer a 3-way selector (e.g. read
+            // one more char: 'l' = insert literal TAB byte, 's' = insert spaces to next stop,
+            // 'm' = move cursor to next stop without writing) stored in a new `tabMode` enum
+            // field. handleKey's missing `case Tab ->` (see the TODO there) reads both fields.
             case 't' -> { /* TODO: T */ }
+            // TODO: Cursor type/shape. Prompt for block/underline/etc. and forward the choice
+            // to the terminal backend's cursor-style call (Lanterna's TextGraphics/Screen
+            // doesn't expose cursor shape directly — this may require dropping to the
+            // underlying Terminal object). Persist the choice in a new `cursorStyle` field.
             case 'c' -> { /* TODO: C */ }
+            // TODO: Display/color theme. Selects among the CLI's /DA, /DB, /DC palettes (see
+            // Main's parsed-but-unused `displayMode`) — add a `displayMode` field here too (or
+            // thread Main's through a setter, like setOutputPath) so F5 D and the CLI flag are
+            // the same setting, and re-render the WHITE/BLACK TextColor.ANSI literals in
+            // redraw()/drawTextPane()/StatusBar via that field instead of the hardcoded colors
+            // used throughout today.
             case 'd' -> { /* TODO: D */ }
+            // TODO: Indentation toggle. Flip the existing `indent` field. When true, Enter (in
+            // handleKey's `case Enter ->`) should copy the leading whitespace of the current
+            // line onto the new line instead of starting at column 0.
             case 'i' -> { /* TODO: I */ }
+            // TODO: Save editor configuration. Persist tabWidth/tabMode, insert-key behavior,
+            // cursorStyle, displayMode, wrapColumn/wordWrap, indent, and print settings
+            // (printMarginLeft/printPageLines — all these fields already exist on EditorScreen)
+            // to a config file under the platform's standard user-config directory (spec leaves
+            // the format/filename undecided — pick one, e.g. config.toml, and load it back on
+            // startup in Main/EditorScreen's constructor with safe defaults on a missing/corrupt
+            // file).
             case 's' -> { /* TODO: S */ }
+            // TODO: TAB/INS key configuration. A small dialog choosing (a) which of the 3 tab
+            // modes from 'T' above Tab uses by default, and (b) whether Ins toggles
+            // insert/replace (current behavior, `case Insert -> insertMode = true` plus F6+Ins)
+            // or always forces insert mode. Store as fields read by handleKey's Insert case.
             case 'k' -> { /* TODO: K */ }
             default  -> { /* cancel */ }
         }
@@ -1076,24 +1199,33 @@ public class EditorScreen implements AppScreen {
                 else enterSplitMode(screen, gui);
             }
             case 'n' -> handleNewFile(screen);               // New file in pane
-            // TODO(spec: F3 File ops — Append): prompt for a path, read it, and insert its
-            // content at the cursor (spec calls this "append" but it's an insert-at-cursor
-            // of another file, not appending to the end). Reject invalid paths/read errors
-            // without mutating the document.
+            // TODO: Append file. Reuse handleNewFile()'s filename-prompt code (rows/redraw
+            // logic) to read a path, then Files.readAllLines(path) it and splice the resulting
+            // lines into `lines` at (cursorRow, cursorCol) the same way insertBlockAt() splices
+            // a block — the cursor stays put on failure. On a missing file or IOException,
+            // leave the document untouched and show an error on the status line (see the
+            // saveFile() TODO for the same error-surfacing gap) instead of throwing.
             case 'a' -> { /* TODO: Append file */ }
-            // TODO(spec: F3 File ops — Load more / partial load): the current loader always
-            // reads the whole file (Files.readAllLines) in the constructor and handleNewFile,
-            // so there is no notion of a partially-loaded document to begin with. Spec wants
-            // an incremental FileSource (loaded prefix + file offset + remaining count) with
-            // F3 L loading the next chunk, and operations needing unseen input refusing with
-            // "CAN'T APPEND, PORTION OF CURRENT INPUT FILE UNREAD" until it's loaded.
+            // TODO: Load more (partial load). This requires the bigger FileSource change
+            // described at the class-level compliance comment: replace the constructor's
+            // Files.readAllLines() with an incremental reader that keeps a file offset and
+            // remaining-byte count, loads only the first N KiB up front, and appends the next
+            // chunk here on 'l'. Until FileSource exists, this case has nothing to load (every
+            // file is already read in full), so leave it a no-op with this TODO rather than
+            // faking partial loads.
             case 'l' -> { /* TODO: L */ }
-            // TODO(spec: F3 File ops — Write through cursor / Close output file): write the
-            // text from the start of the buffer through the cursor to a (possibly separate)
-            // output target, without marking the whole document as saved; 'c' then closes
-            // that output target and should prompt before another is chosen. Needs the
-            // dual input/output-path model from the CLI spec, which Main.java doesn't have.
+            // TODO: Write through cursor. Serialize lines[0..cursorRow].substring(0..cursorCol)
+            // (i.e. everything before the cursor, using extractBlockContent()-style slicing
+            // with markerBeginRow/Col = (0,0) and markerEndRow/Col = cursor) and write it to
+            // the existing `outputPath` field (falls back to `activeFileName` when null — see
+            // setOutputPath()) without touching `activeFileName`'s saved state or clearing the
+            // in-memory buffer.
             case 'w' -> { /* TODO: W */ }
+            // TODO: Close output file. Only meaningful once 'w' above actually opens/tracks a
+            // write target; prompt "close and discard further writes to <path>? (Y/N)" using
+            // the confirmQuit()-style Y/N prompt, then reset `outputPath` to null (via
+            // setOutputPath(null)) so a later 'w' falls back to activeFileName instead of
+            // silently reusing the closed path.
             case 'c' -> { /* TODO: C */ }
             default  -> { /* cancel */ }
         }
