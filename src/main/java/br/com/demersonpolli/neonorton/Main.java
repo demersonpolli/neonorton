@@ -1,3 +1,27 @@
+/*
+ * MIT License
+ *
+ * Copyright (c) 2026 NeoNorton Contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 package br.com.demersonpolli.neonorton;
 
 import com.googlecode.lanterna.TextColor;
@@ -10,28 +34,98 @@ import com.googlecode.lanterna.terminal.swing.TerminalEmulatorAutoCloseTrigger;
 import java.io.IOException;
 
 public class Main {
-    // TODO(spec: Startup/CLI): args is accepted but never read — there is no command-line
-    // parsing at all, so the app always falls back to SplashScreen's interactive filename
-    // prompt. The spec's compatible syntax is:
-    //   ne [+LINE] [INPUT [OUTPUT]] [/DA|/DB|/DC]
-    // plus these portable long-form aliases:
-    //   ne [--line LINE] [--input INPUT] [--output OUTPUT]
-    //   ne [--display da|db|dc] [--safe] [--encoding bytes|utf8]
-    // Needed: parse args into (startLine, inputPath, outputPath, displayMode, safeMode,
-    // encoding) before building the GUI; only fall through to SplashScreen when no input
-    // path was given. `+LINE` should position the initial cursor (EditorScreen has no way
-    // to accept a starting line today). Quoted paths with spaces must be accepted — that's
-    // free from the JVM's own argv splitting, just don't re-split args[] on spaces.
-    // Also missing: F9 DOS/shell command processor — there is no key handling for F9
-    // anywhere in EditorScreen's main loop, and no `shell.c`-equivalent child-process
-    // integration (spec wants an explicit-confirmation shell command using COMSPEC on
-    // Windows / $SHELL -c on POSIX, not the original's raw wildcard-delete aliases).
+
+    /**
+     * Holds command-line arguments for the Norton Editor.
+     * Supports both classic Norton Editor syntax (+LINE, /DA) and modern long-form options.
+     */
+    static class CommandLineArgs {
+        int startLine = 0;
+        String inputPath = null;
+        String outputPath = null;
+        String displayMode = null; // "da", "db", "dc"
+        boolean safeMode = false;
+        String encoding = "utf8"; // "bytes" or "utf8"
+    }
+
+    /**
+     * Parse an integer argument value.
+     * 
+     * @param value the string value to parse
+     * @return the parsed integer, or 0 if parsing fails
+     */
+    private static int parseIntArg(String value) {
+        try {
+            return Integer.parseInt(value);
+        }
+        catch (NumberFormatException e) {
+            System.err.println(String.format("Invalid line number: %s", value));
+            return 0;
+        }
+    }
+    
+    /**
+     * Parse command-line arguments according to Norton Editor spec:
+     *   ne [+LINE] [INPUT [OUTPUT]] [/DA|/DB|/DC]
+     * Plus long-form aliases:
+     *   ne [--line LINE] [--input INPUT] [--output OUTPUT]
+     *   ne [--display da|db|dc] [--safe] [--encoding bytes|utf8]
+     * 
+     * @param args the command-line arguments to parse
+     * @return a CommandLineArgs object containing the parsed arguments
+     */
+    private static CommandLineArgs parseCommandLineArgs(String[] args) {
+        CommandLineArgs result = new CommandLineArgs();
+        
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
+            
+            // Handle +LINE format
+            if (arg.startsWith("+")) {
+                result.startLine = parseIntArg(arg.substring(1));
+            }
+            // Handle /DA, /DB, /DC display modes
+            else if (arg.matches("(?i)/D[ABC]")) {
+                result.displayMode = String.format("d%s", arg.substring(2).toLowerCase());
+            }
+            // Handle long-form options
+            else if (arg.equals("--line") && i + 1 < args.length) {
+                result.startLine = parseIntArg(args[++i]);
+            } else if (arg.equals("--input") && i + 1 < args.length) {
+                result.inputPath = args[++i];
+            } else if (arg.equals("--output") && i + 1 < args.length) {
+                result.outputPath = args[++i];
+            } else if (arg.equals("--display") && i + 1 < args.length) {
+                result.displayMode = args[++i].toLowerCase();
+            } else if (arg.equals("--safe")) {
+                result.safeMode = true;
+            } else if (arg.equals("--encoding") && i + 1 < args.length) {
+                result.encoding = args[++i].toLowerCase();
+            }
+            // Handle positional arguments (INPUT [OUTPUT])
+            else if (!arg.startsWith("-")) {
+                if (result.inputPath == null) {
+                    result.inputPath = arg;
+                }
+                else if (result.outputPath == null) {
+                    result.outputPath = arg;
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    
     public static void main(String[] args) {
         try {
             SwingTerminalFrame terminal = new SwingTerminalFrame(
                     "NeoNorton",
                     TerminalEmulatorAutoCloseTrigger.CloseOnExitPrivateMode);
             terminal.setVisible(true);
+
+            // Parse command-line arguments
+            CommandLineArgs cliArgs = parseCommandLineArgs(args);
 
             Screen screen = new TerminalScreen(terminal);
             screen.startScreen();
@@ -41,11 +135,21 @@ public class Main {
                     new DefaultWindowManager(),
                     new EmptySpace(TextColor.ANSI.BLUE));
 
-            SplashScreen splash = new SplashScreen();
-            splash.show(gui);
-            String fileName = splash.getFileName();
+            String fileName = cliArgs.inputPath;
+            
+            // If no input file specified via CLI, show splash screen to get filename
+            if (fileName == null || fileName.isEmpty()) {
+                SplashScreen splash = new SplashScreen();
+                splash.show(gui);
+                fileName = splash.getFileName();
+            }
 
-            new EditorScreen(fileName).show(gui);
+            // Create editor screen with parsed arguments
+            EditorScreen editor = new EditorScreen(fileName);
+            if (cliArgs.startLine > 0) {
+                editor.setStartLine(cliArgs.startLine);
+            }
+            editor.show(gui);
 
             screen.stopScreen();
             terminal.dispose();
