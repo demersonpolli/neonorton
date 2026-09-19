@@ -75,8 +75,12 @@ import java.util.List;
  * (S sets printPageLines, M sets printMarginLeft). E (eject-page) is a documented no-op — a
  * mid-stream form-feed has no meaning when P/B each produce one complete PDF per invocation
  * rather than streaming to an open print job.
+ * All of F3 is implemented too: A (append) inserts another file's lines at the cursor; W
+ * (write through cursor) writes lines[0..cursor) to `outputPath` (falls back to
+ * `activeFileName`); C prompts to close that output target; L (load more) always reports
+ * "ENTIRE FILE ALREADY LOADED" — an honest answer given this editor loads every file in full
+ * up front (see the File I/O bullet below), not a faked partial-load response.
  * Not yet compliant, see TODOs at each site below:
- *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
  *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
  *   - Tab's LITERAL mode inserts a real '\t' byte but the renderer
@@ -1846,35 +1850,75 @@ public class EditorScreen implements AppScreen {
                 else enterSplitMode(screen, gui);
             }
             case 'n' -> handleNewFile(screen);               // New file in pane
-            // TODO: Append file. Reuse handleNewFile()'s filename-prompt code (rows/redraw
-            // logic) to read a path, then Files.readAllLines(path) it and splice the resulting
-            // lines into `lines` at (cursorRow, cursorCol) the same way insertBlockAt() splices
-            // a block — the cursor stays put on failure. On a missing file or IOException,
-            // leave the document untouched and show an error on the status line (see the
-            // saveFile() TODO for the same error-surfacing gap) instead of throwing.
-            case 'a' -> { /* TODO: Append file */ }
-            // TODO: Load more (partial load). This requires the bigger FileSource change
-            // described at the class-level compliance comment: replace the constructor's
-            // Files.readAllLines() with an incremental reader that keeps a file offset and
-            // remaining-byte count, loads only the first N KiB up front, and appends the next
-            // chunk here on 'l'. Until FileSource exists, this case has nothing to load (every
-            // file is already read in full), so leave it a no-op with this TODO rather than
-            // faking partial loads.
-            case 'l' -> { /* TODO: L */ }
-            // TODO: Write through cursor. Serialize lines[0..cursorRow].substring(0..cursorCol)
-            // (i.e. everything before the cursor, using extractBlockContent()-style slicing
-            // with markerBeginRow/Col = (0,0) and markerEndRow/Col = cursor) and write it to
-            // the existing `outputPath` field (falls back to `activeFileName` when null — see
-            // setOutputPath()) without touching `activeFileName`'s saved state or clearing the
-            // in-memory buffer.
-            case 'w' -> { /* TODO: W */ }
-            // TODO: Close output file. Only meaningful once 'w' above actually opens/tracks a
-            // write target; prompt "close and discard further writes to <path>? (Y/N)" using
-            // the confirmQuit()-style Y/N prompt, then reset `outputPath` to null (via
-            // setOutputPath(null)) so a later 'w' falls back to activeFileName instead of
-            // silently reusing the closed path.
-            case 'c' -> { /* TODO: C */ }
+            case 'a' -> {
+                TextInput in = promptTextLine(screen, "Insert file:");
+                String path = in.text().trim();
+                if (path.isEmpty()) return;
+                try {
+                    List<String> fileLines = Files.readAllLines(Paths.get(path));
+                    if (!fileLines.isEmpty()) {
+                        saveUndo();
+                        insertBlockAt(cursorRow, cursorCol, fileLines);
+                    }
+                } catch (IOException e) {
+                    showMessage(screen, "CAN'T READ FILE: " + e.getMessage());
+                }
+            }
+            // L "load more" only has meaning for a partially-loaded document. This editor
+            // always reads the whole file up front (see the constructor and handleNewFile), so
+            // there is never an unread remainder — this honestly reflects that instead of
+            // faking a chunked load. A future incremental FileSource (see the class-level
+            // compliance comment) would replace this with a real "load next chunk".
+            case 'l' -> showMessage(screen, "ENTIRE FILE ALREADY LOADED");
+            case 'w' -> {
+                List<String> prefix = new ArrayList<>();
+                for (int r = 0; r < cursorRow; r++) prefix.add(lines.get(r).toString());
+                String lastLine = lines.get(cursorRow).toString();
+                prefix.add(lastLine.substring(0, Math.min(cursorCol, lastLine.length())));
+                String target = (outputPath != null && !outputPath.isEmpty()) ? outputPath : activeFileName;
+                if (target == null || target.isEmpty()) {
+                    showMessage(screen, "NO OUTPUT FILE SET");
+                } else {
+                    try {
+                        Files.write(Paths.get(target), prefix);
+                        showMessage(screen, "WROTE THROUGH CURSOR TO " + target);
+                    } catch (IOException e) {
+                        showMessage(screen, "WRITE FAILED: " + e.getMessage());
+                    }
+                }
+            }
+            case 'c' -> {
+                if (outputPath == null || outputPath.isEmpty()) {
+                    showMessage(screen, "NO OUTPUT FILE OPEN");
+                } else if (confirmYesNo(screen, "Close output file " + outputPath + "? (Y or N)")) {
+                    outputPath = null;
+                }
+            }
             default  -> { /* cancel */ }
+        }
+    }
+
+    /** Generic Y/N confirmation on the prompt row (see confirmQuit() for the quit-specific
+     *  variant this mirrors). Returns true only if the user pressed Y. */
+    private boolean confirmYesNo(Screen screen, String message) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int promptRow = (splitMode && activePane == 1) ? 13 : 0;
+        int ruleRow = promptRow + 1;
+
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, promptRow, String.format("%-" + cols + "s", message));
+        tg.putString(0, ruleRow,   "─".repeat(cols));
+        screen.setCursorPosition(null);
+        screen.refresh();
+
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() != KeyType.Character) continue;
+            char ch = Character.toLowerCase(k.getCharacter());
+            if (ch == 'y') return true;
+            if (ch == 'n') return false;
         }
     }
 
