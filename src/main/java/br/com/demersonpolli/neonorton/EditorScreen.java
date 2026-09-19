@@ -41,7 +41,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 /*
@@ -90,14 +92,19 @@ import java.util.List;
  * console-window allocation, not this code — an AWT/Swing GUI window launched the same way
  * works fine there), so none of the three platforms' "does a real window actually appear and
  * accept input" behavior has been empirically confirmed on a real desktop session yet.
+ * Ctrl-P (insert a raw byte by hex value) and a real multi-level undo are implemented too: an
+ * UndoEntry stack (undoStack, capped at UNDO_STACK_LIMIT), one per pane like the other
+ * per-pane state, pushed by saveUndo() before every mutating command — typing included, via
+ * insertChar()'s `coalesce` flag, which merges a run of consecutive plain keystrokes into one
+ * checkpoint (a deliberate UX/performance tradeoff over one checkpoint per character; every
+ * other command still gets its own checkpoint). Each checkpoint is a full-buffer snapshot, not
+ * a per-line diff — a simplicity/memory tradeoff reasonable at this editor's scale, not
+ * literally unbounded (capped, oldest entries evicted first).
  * Not yet compliant, see TODOs at each site below:
- *   - Ctrl-P (insert control/extended byte) is not implemented.
  *   - Tab's LITERAL mode inserts a real '\t' byte but the renderer
  *     (drawTextPane) does no column-width expansion for it, so a literal tab
  *     will visually misalign — a pre-existing renderer limitation, not fixed
  *     here; SPACES/MOVE modes (the default) have no such issue.
- *   - Undo is single-level and only snapshotted around delete-class ops, not
- *     an unbounded stack covering every insert/delete/replace transaction.
  *   - File I/O is line-based UTF-8 text (Files.readAllLines/write): no CRLF
  *     preservation, no binary/byte-safe mode, no atomic save, no incremental
  *     load for large files.
@@ -173,9 +180,23 @@ public class EditorScreen implements AppScreen {
     // Signal to break out of main loop after file operations
     private boolean shouldQuit = false;
 
-    // Single-level undo snapshot for delete commands
-    private List<String> undoLines = null;
-    private int undoRow = 0, undoCol = 0;
+    /** One undo transaction: a full-buffer snapshot plus the cursor position to restore to.
+     *  Whole-buffer snapshots (not per-line diffs) are a deliberate simplicity/memory tradeoff
+     *  reasonable at this editor's scale — see the class-level compliance note. */
+    private record UndoEntry(List<String> lines, int cursorRow, int cursorCol) {}
+
+    // Multi-level undo stack (Ctrl-U) — one per pane, swapped alongside the other per-pane
+    // state in swapActivePaneData(). Capped so a very long session can't grow it unbounded.
+    private static final int UNDO_STACK_LIMIT = 500;
+    private Deque<UndoEntry> undoStack  = new ArrayDeque<>();
+    private Deque<UndoEntry> undoStack2 = new ArrayDeque<>();
+
+    // True right after insertChar() runs for a plain typed character (not Ctrl-P, not any
+    // other command); lets a run of consecutive keystrokes share one undo step instead of
+    // costing one snapshot per character. Reset to false at the top of every handleKey() call,
+    // then set back to true only by the plain-character branch — so any other key in between
+    // (arrows, Enter, Backspace, a command...) naturally ends the run.
+    private boolean typingRunActive = false;
 
     // ---- Split-pane state ----
     private boolean splitMode = false;
@@ -463,6 +484,11 @@ public class EditorScreen implements AppScreen {
         }
         int cols = size.getColumns();
 
+        // Reset by default; only the plain-character branch below sets this back to true, so
+        // any other key ends a coalesced typing run (see the field's own comment).
+        boolean wasTyping = typingRunActive;
+        typingRunActive = false;
+
         switch (type) {
             case Character -> {
                 char ch = key.getCharacter();
@@ -470,16 +496,14 @@ public class EditorScreen implements AppScreen {
                     switch (Character.toLowerCase(ch)) {
                         case 'w' -> deleteWordLeft();
                         case 'l' -> deleteToLineBegin();
-                        case 'u' -> undoLastDelete();
+                        case 'u' -> undo();
                         case 'v' -> toggleCaseToLineBegin();
                         case 'f' -> searchReverse(screen);
                         case 'c' -> continueReverse(screen);
-                        // TODO: Ctrl-P, insert literal/extended byte. Prompt for a raw
-                        // byte/codepoint (e.g. two hex digits) and insert it directly into the
-                        // current line via `lines.get(cursorRow).insert(cursorCol, ch)` the same
-                        // way handleKey's plain Character case does, bypassing normal
-                        // printable-character filtering so control bytes can be entered.
-                        case 'p' -> { /* TODO: insert literal byte */ }
+                        case 'p' -> {
+                            Integer b = promptHexByte(screen);
+                            if (b != null) insertChar((char) b.intValue(), false);
+                        }
                         default  -> {}
                     }
                 } else if (key.isAltDown()) {
@@ -493,18 +517,13 @@ public class EditorScreen implements AppScreen {
                         default  -> {}
                     }
                 } else {
-                    StringBuilder line = lines.get(cursorRow);
-                    if (insertMode || cursorCol >= line.length()) {
-                        line.insert(cursorCol, ch);
-                    } else {
-                        line.setCharAt(cursorCol, ch);
-                    }
-                    cursorCol++;
-                    applyWordWrap();
+                    insertChar(ch, wasTyping);
+                    typingRunActive = true;
                 }
             }
             case Insert -> insertMode = insToggles ? !insertMode : true; // F5 K controls which
             case Enter -> {
+                saveUndo();
                 StringBuilder current = lines.get(cursorRow);
                 String tail = current.substring(cursorCol);
                 current.delete(cursorCol, current.length());
@@ -522,14 +541,17 @@ public class EditorScreen implements AppScreen {
             case Tab -> {
                 switch (tabMode) {
                     case LITERAL -> {
+                        saveUndo();
                         lines.get(cursorRow).insert(cursorCol, '\t');
                         cursorCol++;
                     }
                     case SPACES -> {
+                        saveUndo();
                         int n = tabWidth - (cursorCol % tabWidth);
                         lines.get(cursorRow).insert(cursorCol, " ".repeat(n));
                         cursorCol += n;
                     }
+                    // MOVE doesn't mutate the buffer, so no undo checkpoint is needed here.
                     case MOVE -> cursorCol = Math.min(
                             cursorCol + (tabWidth - (cursorCol % tabWidth)), lines.get(cursorRow).length());
                 }
@@ -677,6 +699,66 @@ public class EditorScreen implements AppScreen {
             cursorRow++;
             cursorCol -= (sp + 1);
         }
+    }
+
+    /** Insert or overwrite `ch` at the cursor per insert/replace mode, advance the cursor, and
+     *  apply word-wrap if enabled. Shared by plain typing (handleKey's Character case, which
+     *  coalesces consecutive keystrokes via `coalesce`) and Ctrl-P's literal-byte insertion
+     *  (which always passes false — each is its own distinct, deliberate undo step). */
+    private void insertChar(char ch, boolean coalesce) {
+        if (!coalesce || undoStack.isEmpty()) saveUndo();
+        StringBuilder line = lines.get(cursorRow);
+        if (insertMode || cursorCol >= line.length()) {
+            line.insert(cursorCol, ch);
+        } else {
+            line.setCharAt(cursorCol, ch);
+        }
+        cursorCol++;
+        applyWordWrap();
+    }
+
+    /** Ctrl-P's raw-byte prompt: reads up to 2 hex digits and returns the resulting byte value
+     *  (0-255), or null on Escape, empty input, or a non-hex character. */
+    private Integer promptHexByte(Screen screen) throws IOException {
+        int cols      = screen.getTerminalSize().getColumns();
+        int promptRow = (splitMode && activePane == 1) ? 13 : 0;
+        int inputRow  = promptRow + 1;
+        int ruleRow   = promptRow + 2;
+
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, promptRow, String.format("%-" + cols + "s", "Insert byte (hex 00-FF):"));
+        tg.putString(0, inputRow,  String.format("%-" + cols + "s", ""));
+        tg.putString(0, ruleRow,   "─".repeat(cols));
+        screen.setCursorPosition(new TerminalPosition(0, inputRow));
+        screen.refresh();
+
+        StringBuilder hex = new StringBuilder();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return null;
+            if (k.getKeyType() == KeyType.Enter) break;
+            if (k.getKeyType() == KeyType.Backspace) {
+                if (hex.length() > 0) hex.deleteCharAt(hex.length() - 1);
+            } else if (k.getKeyType() == KeyType.Character && !k.isCtrlDown() && !k.isAltDown()
+                    && hex.length() < 2 && isHexDigit(k.getCharacter())) {
+                hex.append(Character.toUpperCase(k.getCharacter()));
+            }
+            tg.putString(0, inputRow, String.format("%-" + cols + "s", hex.toString()));
+            screen.setCursorPosition(new TerminalPosition(hex.length(), inputRow));
+            screen.refresh();
+        }
+        if (hex.length() == 0) return null;
+        try {
+            return Integer.parseInt(hex.toString(), 16);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static boolean isHexDigit(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     }
 
     // ------------------------------------------------------------------ search & replace
@@ -2022,6 +2104,8 @@ public class EditorScreen implements AppScreen {
         if (lines.isEmpty()) lines.add(new StringBuilder());
         activeFileName = newName;
         cursorRow = 0; cursorCol = 0; scrollRow = 0;
+        undoStack.clear();
+        typingRunActive = false;
     }
 
     /** Ask user to confirm quit; on Y: exit (single) or close pane (split). */
@@ -2065,6 +2149,8 @@ public class EditorScreen implements AppScreen {
         scrollRow    = scrollRow2;   scrollRow2  = 0;
         insertMode   = insertMode2;  insertMode2 = true;
         activeFileName = fileName2;  fileName2   = "";
+        undoStack    = undoStack2;   undoStack2  = new ArrayDeque<>();
+        typingRunActive = false;
         splitMode  = false;
         activePane = 0;
         // Move status bar back to the bottom row
@@ -2086,6 +2172,8 @@ public class EditorScreen implements AppScreen {
         tmp = markerBeginCol; markerBeginCol = markerBeginCol2; markerBeginCol2 = tmp;
         tmp = markerEndRow;   markerEndRow   = markerEndRow2;   markerEndRow2   = tmp;
         tmp = markerEndCol;   markerEndCol   = markerEndCol2;   markerEndCol2   = tmp;
+        Deque<UndoEntry> tmpU = undoStack; undoStack = undoStack2; undoStack2 = tmpU;
+        typingRunActive = false; // don't let a coalesced run span across a pane switch
     }
 
     /** Draw the split-mode filename-entry UI and load the second file. */
@@ -2167,41 +2255,39 @@ public class EditorScreen implements AppScreen {
         if (lines2.isEmpty()) lines2.add(new StringBuilder());
 
         cursorRow2 = 0; cursorCol2 = 0; scrollRow2 = 0; insertMode2 = true;
+        undoStack2 = new ArrayDeque<>();
         splitMode = true;
         activePane = 1; // focus moves to the newly opened pane
     }
 
     // ------------------------------------------------------------------ delete helpers
 
-    // TODO(spec: Editing semantics — Undelete/undo): this is a single-slot snapshot
-    // (saveUndo overwrites undoLines every call, undoLastDelete consumes it once) covering
-    // only the delete-class commands that already call saveUndo(). The spec's compatible
-    // contract just says Ctrl-U maps to "undo" with unspecified depth, but its portable
-    // design choice explicitly asks for an unbounded undo STACK where every insert/delete/
-    // replace — including plain typing and Enter, which never call saveUndo() today — is
-    // one transaction. Replace this pair with an UndoStack of transactions (e.g. row-range
-    // diffs, not full-buffer string copies) and call it from every mutating handler,
-    // including handleKey's Character/Enter cases which currently have no undo support at all.
+    /** Push the CURRENT buffer state as an undo checkpoint — call before any mutation (typing
+     *  coalesces via insertChar()'s `coalesce` flag instead of calling this directly). */
     private void saveUndo() {
-        undoLines = new ArrayList<>();
-        for (StringBuilder sb : lines) undoLines.add(sb.toString());
-        undoRow = cursorRow;
-        undoCol = cursorCol;
+        List<String> snapshot = new ArrayList<>(lines.size());
+        for (StringBuilder sb : lines) snapshot.add(sb.toString());
+        undoStack.addLast(new UndoEntry(snapshot, cursorRow, cursorCol));
+        if (undoStack.size() > UNDO_STACK_LIMIT) undoStack.removeFirst();
     }
 
-    private void undoLastDelete() {
-        if (undoLines == null) return;
+    /** Ctrl-U: pop and restore the most recent undo checkpoint. One step per press — a run of
+     *  consecutive typed characters was pushed as a single checkpoint by insertChar(), so
+     *  undoing it removes the whole run at once; every other mutation is its own checkpoint. */
+    private void undo() {
+        if (undoStack.isEmpty()) return;
+        UndoEntry entry = undoStack.removeLast();
         lines.clear();
-        for (String s : undoLines) lines.add(new StringBuilder(s));
-        cursorRow = Math.min(undoRow, lines.size() - 1);
-        cursorCol = Math.min(undoCol, lines.get(cursorRow).length());
-        undoLines = null;
+        for (String s : entry.lines()) lines.add(new StringBuilder(s));
+        cursorRow = Math.min(entry.cursorRow(), lines.size() - 1);
+        cursorCol = Math.min(entry.cursorCol(), lines.get(cursorRow).length());
+        typingRunActive = false;
     }
 
     /** Ctrl+W – delete one word to the left */
     private void deleteWordLeft() {
-        saveUndo();
         if (cursorCol == 0) return;
+        saveUndo();
         String s = lines.get(cursorRow).toString();
         int c = cursorCol - 1;
         while (c > 0 && !Character.isLetterOrDigit(s.charAt(c))) c--;
@@ -2212,10 +2298,10 @@ public class EditorScreen implements AppScreen {
 
     /** Alt+W – delete one word to the right */
     private void deleteWordRight() {
-        saveUndo();
         String s = lines.get(cursorRow).toString();
         int len = s.length();
         if (cursorCol >= len) return;
+        saveUndo();
         int c = cursorCol;
         while (c < len && !Character.isLetterOrDigit(s.charAt(c))) c++;
         while (c < len && Character.isLetterOrDigit(s.charAt(c))) c++;
@@ -2252,6 +2338,7 @@ public class EditorScreen implements AppScreen {
     /** Ctrl+V – toggle upper/lowercase from cursor back to beginning of line */
     private void toggleCaseToLineBegin() {
         if (cursorCol == 0) return;
+        saveUndo();
         StringBuilder line = lines.get(cursorRow);
         for (int c = 0; c < cursorCol; c++) {
             char ch = line.charAt(c);
@@ -2265,6 +2352,7 @@ public class EditorScreen implements AppScreen {
         StringBuilder line = lines.get(cursorRow);
         int end = line.length();
         if (cursorCol >= end) return;
+        saveUndo();
         for (int c = cursorCol; c < end; c++) {
             char ch = line.charAt(c);
             line.setCharAt(c, Character.isUpperCase(ch) ? Character.toLowerCase(ch)
