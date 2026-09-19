@@ -34,6 +34,7 @@ import com.googlecode.lanterna.input.KeyType;
 import com.googlecode.lanterna.screen.Screen;
 import com.googlecode.lanterna.terminal.swing.TerminalEmulatorDeviceConfiguration;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -80,8 +81,16 @@ import java.util.List;
  * `activeFileName`); C prompts to close that output target; L (load more) always reports
  * "ENTIRE FILE ALREADY LOADED" — an honest answer given this editor loads every file in full
  * up front (see the File I/O bullet below), not a faked partial-load response.
+ * F9 is implemented too, deliberately deviating from the spec's embedded DOS command line at
+ * the user's request: it Y/N-confirms, then opens a real, separate, OS-native shell window in
+ * the active file's folder (see ShellLauncher) — cmd.exe on Windows, Terminal.app on macOS, the
+ * first available terminal emulator on Linux. See ShellLauncher's class doc for the honest
+ * verification status: this was built inside a sandboxed agent environment where even a bare,
+ * un-Java'd `cmd.exe /K` never produces a real console window (isolated to that sandbox's
+ * console-window allocation, not this code — an AWT/Swing GUI window launched the same way
+ * works fine there), so none of the three platforms' "does a real window actually appear and
+ * accept input" behavior has been empirically confirmed on a real desktop session yet.
  * Not yet compliant, see TODOs at each site below:
- *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
  *   - Tab's LITERAL mode inserts a real '\t' byte but the renderer
  *     (drawTextPane) does no column-width expansion for it, so a literal tab
@@ -399,6 +408,28 @@ public class EditorScreen implements AppScreen {
                         freeDiskSpaceBytes(fn)
                     );
                     new StatusScreen(info).show(gui);
+                    redraw(screen);
+                    continue;
+                }
+
+                // F9 — open an OS shell/command-prompt window (see ShellLauncher)
+                if (type == KeyType.F9) {
+                    boolean pane2 = splitMode && activePane == 1;
+                    String fn = pane2 ? fileName2 : activeFileName;
+                    File workDir;
+                    if (fn == null || fn.isEmpty()) {
+                        workDir = new File(".");
+                    } else {
+                        Path parent = Paths.get(fn).toAbsolutePath().getParent();
+                        workDir = (parent != null) ? parent.toFile() : new File(".");
+                    }
+                    if (confirmYesNo(screen, "Open a system shell here? (Y or N)")) {
+                        try {
+                            ShellLauncher.openInteractiveShell(workDir);
+                        } catch (ShellLauncher.LaunchException e) {
+                            showMessage(screen, "COULDN'T OPEN SHELL: " + e.getMessage());
+                        }
+                    }
                     redraw(screen);
                     continue;
                 }
