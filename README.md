@@ -132,9 +132,13 @@ Press **F3** to activate the file command bar, then press the highlighted letter
 | X | Open second pane / switch between panes |
 | N | Open a new file in the active pane |
 | A | Append another file's contents at the cursor |
-| L | Load more — this editor always loads a file in full, so this just confirms there's nothing left unread |
+| L | Load more of the file — files over 256 KB open with only the first 256 KB loaded; **L** pulls in the next 256 KB, repeatable until the whole file is loaded (a status message reports how much, if any, remains) |
 | W | Write from the start of the buffer through the cursor to the output file (see `--output`, or **F3 C** to close it) |
 | C | Close the output file opened by **W** |
+
+Saving (**F3 E** / **F3 S**) with part of the file still unread never loses that part — whatever
+hasn't been loaded is carried forward from disk untouched, so it's always safe to edit and save
+the beginning of a large file without loading the rest first.
 
 ---
 

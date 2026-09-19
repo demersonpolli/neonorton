@@ -36,16 +36,21 @@ import com.googlecode.lanterna.terminal.swing.TerminalEmulatorDeviceConfiguratio
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 
@@ -113,20 +118,21 @@ import java.util.List;
  * docColToScreenCol(), so Tab's LITERAL mode no longer visually misaligns anything after it;
  * this closes what was previously a documented renderer gap.
  * File I/O (saveFile()) now preserves the original file's CRLF/LF line-ending style
- * (detectLineEnding()) instead of always writing the platform default, and saves via a
- * write-to-temp-then-atomic-rename in the same directory so a crash or failed write can't
- * leave a truncated file in place of the original, falling back to a plain replace if the
- * filesystem can't do an atomic rename. Failures are reported to the user instead of silently
- * swallowed.
+ * (`lineEnding`, detected by loadFilePrefix()) instead of always writing the platform default,
+ * and saves via a write-to-temp-then-atomic-rename in the same directory so a crash or failed
+ * write can't leave a truncated file in place of the original, falling back to a plain replace
+ * if the filesystem can't do an atomic rename. Failures are reported to the user instead of
+ * silently swallowed.
+ * F3 L "load more" is a real incremental FileSource now, not a stub: a file over
+ * INITIAL_LOAD_BYTES is read only up to that budget (trimmed back to the last line boundary —
+ * see loadFilePrefix()), `unreadOffset`/`fileSize` (per pane) track how much is left, F3 L
+ * reads the next CHUNK_LOAD_BYTES-sized piece, and saveFile() carries forward whatever was
+ * never loaded — read straight from disk and appended after what's written from memory — so
+ * saving before loading everything can never silently truncate the file.
  * Scope note: this editor targets plain text / source code, not arbitrary binary files — a
  * byte-safe document model (the spec's "byte/legacy encoding mode") is intentionally out of
  * scope, confirmed with the user, not a gap to fill later. The line-based UTF-8 String model
  * (List<StringBuilder> lines) is the permanent design here.
- * Not yet compliant, see TODOs at each site below:
- *   - Load doesn't do incremental/partial loading for very large text files — a real
- *     FileSource (offset + remaining-byte tracking, F3 L loading the next chunk) would be a
- *     much larger architectural change than the save-path fixes above, not attempted here; F3
- *     L's own note covers the same boundary.
  */
 public class EditorScreen implements AppScreen {
 
@@ -137,6 +143,17 @@ public class EditorScreen implements AppScreen {
     // instead of always writing the platform default. Per-pane like activeFileName/fileName2.
     private String lineEnding  = System.lineSeparator();
     private String lineEnding2 = System.lineSeparator();
+
+    // F3 L "load more": incremental loading. `unreadOffset` is the byte offset into the file
+    // where the in-memory `lines` content ends and unread content begins; `fileSize` is the
+    // file's total size at the time it was last read. unreadOffset == fileSize means "fully
+    // loaded". A file <= INITIAL_LOAD_BYTES is read in full up front (unreadOffset == fileSize
+    // immediately), so this machinery is a no-op for the common case of an ordinary-sized file.
+    // Per-pane like the other file-load state.
+    private static final long INITIAL_LOAD_BYTES = 256L * 1024;
+    private static final long CHUNK_LOAD_BYTES   = 256L * 1024;
+    private long unreadOffset = 0, fileSize = 0;
+    private long unreadOffset2 = 0, fileSize2 = 0;
 
     // Lines of text in the document
     private List<StringBuilder> lines = new ArrayList<>();
@@ -260,21 +277,98 @@ public class EditorScreen implements AppScreen {
     /** Result of promptTextLine(): the text typed, and whether it was finished via ESC. */
     private record TextInput(String text, boolean escaped) {}
 
-    /** Detects whether `path`'s content uses CRLF or bare LF line endings, from the first
-     *  newline actually found in its raw bytes. Falls back to the platform default for a
-     *  new, empty, or unreadable file — there's nothing to preserve in that case anyway. */
-    private static String detectLineEnding(Path path) {
-        try {
-            byte[] bytes = Files.readAllBytes(path);
-            for (int i = 0; i < bytes.length; i++) {
-                if (bytes[i] == '\n') {
-                    return (i > 0 && bytes[i - 1] == '\r') ? "\r\n" : "\n";
-                }
-            }
-        } catch (IOException e) {
-            // fall through to the platform default
+    /** Result of loadFilePrefix(): the lines decoded from the chunk read, the byte offset in
+     *  the file where reading stopped (always exactly on a line boundary, or at EOF), the
+     *  file's total size at read time, and the line-ending style detected from this chunk. */
+    private record LoadResult(List<StringBuilder> lines, long offset, long fileSize, String lineEnding) {}
+
+    /**
+     * Reads up to `maxBytes` of `path` starting at `fromOffset`, then trims back to the last
+     * complete line boundary within that window (or to EOF, if the window reaches it) so a
+     * line is never split across two loads — the offset returned is always safe to resume
+     * `loadFilePrefix` from later (F3 L) without re-reading or losing anything. A file that
+     * fits within `maxBytes` is simply read in full in one call, same as before this existed.
+     *
+     * Splitting exactly at a '\n' byte is always safe for UTF-8: a bare newline byte can never
+     * appear as part of a multi-byte character, only as a complete one-byte character itself.
+     */
+    private static LoadResult loadFilePrefix(Path path, long fromOffset, long maxBytes) throws IOException {
+        long totalSize = Files.size(path);
+        long budget = Math.max(0, Math.min(maxBytes, totalSize - fromOffset));
+
+        ByteBuffer buf = ByteBuffer.allocate((int) budget);
+        try (SeekableByteChannel ch = Files.newByteChannel(path, StandardOpenOption.READ)) {
+            ch.position(fromOffset);
+            while (buf.hasRemaining() && ch.read(buf) >= 0) { /* keep reading */ }
         }
-        return System.lineSeparator();
+        buf.flip();
+        byte[] chunk = new byte[buf.remaining()];
+        buf.get(chunk);
+
+        byte[] usable;
+        long newOffset;
+        if (fromOffset + chunk.length >= totalSize) {
+            usable = chunk; // reached EOF: everything read is usable, boundary or not
+            newOffset = totalSize;
+        } else {
+            int lastNl = -1;
+            for (int i = chunk.length - 1; i >= 0; i--) {
+                if (chunk[i] == '\n') { lastNl = i; break; }
+            }
+            if (lastNl < 0) {
+                usable = chunk; // one line longer than the whole budget; take it anyway
+                newOffset = fromOffset + chunk.length;
+            } else {
+                usable = Arrays.copyOfRange(chunk, 0, lastNl + 1);
+                newOffset = fromOffset + lastNl + 1;
+            }
+        }
+
+        String detected = System.lineSeparator();
+        for (int i = 0; i < usable.length; i++) {
+            if (usable[i] == '\n') {
+                detected = (i > 0 && usable[i - 1] == '\r') ? "\r\n" : "\n";
+                break;
+            }
+        }
+
+        return new LoadResult(splitLines(new String(usable, StandardCharsets.UTF_8)), newOffset, totalSize, detected);
+    }
+
+    /** Splits `text` into lines on "\n" or "\r\n" (matching loadFilePrefix()'s own line-ending
+     *  detection convention — bare "\r" is not treated as a line break). A trailing newline
+     *  does not produce an extra empty line, matching Files.readAllLines()'s behavior. */
+    private static List<StringBuilder> splitLines(String text) {
+        List<StringBuilder> result = new ArrayList<>();
+        int start = 0;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') {
+                int end = (i > start && text.charAt(i - 1) == '\r') ? i - 1 : i;
+                result.add(new StringBuilder(text.substring(start, end)));
+                start = i + 1;
+            }
+        }
+        if (start < text.length()) result.add(new StringBuilder(text.substring(start)));
+        return result;
+    }
+
+    /** Reads the raw bytes of `path` from `fromOffset` to EOF — used by saveFile() to carry
+     *  forward whatever portion of the file was never loaded into memory, unchanged. */
+    private static byte[] readTailBytes(Path path, long fromOffset) throws IOException {
+        long remaining = Files.size(path) - fromOffset;
+        if (remaining <= 0) return new byte[0];
+        if (remaining > Integer.MAX_VALUE - 8) {
+            throw new IOException("unread portion is too large to save in one piece");
+        }
+        ByteBuffer buf = ByteBuffer.allocate((int) remaining);
+        try (SeekableByteChannel ch = Files.newByteChannel(path, StandardOpenOption.READ)) {
+            ch.position(fromOffset);
+            while (buf.hasRemaining() && ch.read(buf) >= 0) { /* keep reading */ }
+        }
+        buf.flip();
+        byte[] result = new byte[buf.remaining()];
+        buf.get(result);
+        return result;
     }
 
     public EditorScreen(String fileName) {
@@ -283,13 +377,13 @@ public class EditorScreen implements AppScreen {
         if (!fileName.isEmpty()) {
             Path path = Paths.get(fileName);
             if (Files.exists(path)) {
-                lineEnding = detectLineEnding(path);
                 try {
-                    List<String> fileLines = Files.readAllLines(path);
-                    for (String line : fileLines) {
-                        lines.add(new StringBuilder(line));
-                    }
+                    LoadResult r = loadFilePrefix(path, 0, INITIAL_LOAD_BYTES);
+                    lines.addAll(r.lines());
                     if (lines.isEmpty()) lines.add(new StringBuilder());
+                    unreadOffset = r.offset();
+                    fileSize = r.fileSize();
+                    lineEnding = r.lineEnding();
                 } catch (IOException e) {
                     lines.add(new StringBuilder()); // fallback to empty on read error
                 }
@@ -470,11 +564,13 @@ public class EditorScreen implements AppScreen {
                     int    cc  = pane2 ? cursorCol2   : cursorCol;
                     boolean im = pane2 ? insertMode2  : insertMode;
                     List<StringBuilder> paneLines = pane2 ? lines2 : lines;
+                    long uOff  = pane2 ? unreadOffset2 : unreadOffset;
+                    long fSize = pane2 ? fileSize2     : fileSize;
                     StatusScreen.StatusInfo info = new StatusScreen.StatusInfo(
                         fn, outputPath, lc, cr, cc, im, wordWrap, indent,
                         wrapColumn, tabWidth, printMarginLeft, printPageLines,
                         countBufferChars(paneLines),
-                        0L, // unread input chars: always 0 until F3 L "load more" exists
+                        Math.max(0, fSize - uOff), // unread input chars: real once F3 L exists
                         freeDiskSpaceBytes(fn)
                     );
                     new StatusScreen(info).show(gui);
@@ -2062,12 +2158,7 @@ public class EditorScreen implements AppScreen {
                     showMessage(screen, "CAN'T READ FILE: " + e.getMessage());
                 }
             }
-            // L "load more" only has meaning for a partially-loaded document. This editor
-            // always reads the whole file up front (see the constructor and handleNewFile), so
-            // there is never an unread remainder — this honestly reflects that instead of
-            // faking a chunked load. A future incremental FileSource (see the class-level
-            // compliance comment) would replace this with a real "load next chunk".
-            case 'l' -> showMessage(screen, "ENTIRE FILE ALREADY LOADED");
+            case 'l' -> loadMore(screen);
             case 'w' -> {
                 List<String> prefix = new ArrayList<>();
                 for (int r = 0; r < cursorRow; r++) prefix.add(lines.get(r).toString());
@@ -2117,6 +2208,25 @@ public class EditorScreen implements AppScreen {
             char ch = Character.toLowerCase(k.getCharacter());
             if (ch == 'y') return true;
             if (ch == 'n') return false;
+        }
+    }
+
+    /** F3 L: load the next chunk of the active file, if any of it is still unread. */
+    private void loadMore(Screen screen) throws IOException {
+        if (activeFileName.isEmpty() || unreadOffset >= fileSize) {
+            showMessage(screen, "ENTIRE FILE ALREADY LOADED");
+            return;
+        }
+        try {
+            LoadResult chunk = loadFilePrefix(Paths.get(activeFileName), unreadOffset, CHUNK_LOAD_BYTES);
+            lines.addAll(chunk.lines());
+            unreadOffset = chunk.offset();
+            fileSize = chunk.fileSize(); // the file may have grown/shrunk on disk since last read
+            showMessage(screen, unreadOffset >= fileSize
+                    ? "LOADED THE REST OF THE FILE"
+                    : String.format("LOADED MORE (%,d BYTES STILL UNREAD)", fileSize - unreadOffset));
+        } catch (IOException e) {
+            showMessage(screen, "LOAD FAILED: " + e.getMessage());
         }
     }
 
@@ -2176,13 +2286,17 @@ public class EditorScreen implements AppScreen {
         String newName = nameBuilder.toString().trim();
         lines.clear();
         lineEnding = System.lineSeparator();
+        unreadOffset = 0;
+        fileSize = 0;
         if (!newName.isEmpty()) {
             Path path = Paths.get(newName);
             if (Files.exists(path)) {
-                lineEnding = detectLineEnding(path);
                 try {
-                    for (String line : Files.readAllLines(path))
-                        lines.add(new StringBuilder(line));
+                    LoadResult r = loadFilePrefix(path, 0, INITIAL_LOAD_BYTES);
+                    lines.addAll(r.lines());
+                    unreadOffset = r.offset();
+                    fileSize = r.fileSize();
+                    lineEnding = r.lineEnding();
                 } catch (IOException e) {
                     lines.add(new StringBuilder());
                 }
@@ -2237,6 +2351,8 @@ public class EditorScreen implements AppScreen {
         insertMode   = insertMode2;  insertMode2 = true;
         activeFileName = fileName2;  fileName2   = "";
         lineEnding   = lineEnding2;  lineEnding2 = System.lineSeparator();
+        unreadOffset = unreadOffset2; unreadOffset2 = 0;
+        fileSize     = fileSize2;    fileSize2   = 0;
         undoStack    = undoStack2;   undoStack2  = new ArrayDeque<>();
         typingRunActive = false;
         splitMode  = false;
@@ -2257,6 +2373,9 @@ public class EditorScreen implements AppScreen {
         boolean tmpB = insertMode; insertMode = insertMode2; insertMode2 = tmpB;
         String tmpS = activeFileName; activeFileName = fileName2; fileName2 = tmpS;
         String tmpLE = lineEnding; lineEnding = lineEnding2; lineEnding2 = tmpLE;
+        long tmpL;
+        tmpL = unreadOffset; unreadOffset = unreadOffset2; unreadOffset2 = tmpL;
+        tmpL = fileSize;     fileSize     = fileSize2;     fileSize2     = tmpL;
         tmp = markerBeginRow; markerBeginRow = markerBeginRow2; markerBeginRow2 = tmp;
         tmp = markerBeginCol; markerBeginCol = markerBeginCol2; markerBeginCol2 = tmp;
         tmp = markerEndRow;   markerEndRow   = markerEndRow2;   markerEndRow2   = tmp;
@@ -2331,13 +2450,17 @@ public class EditorScreen implements AppScreen {
         // Load file into lines2
         lines2.clear();
         lineEnding2 = System.lineSeparator();
+        unreadOffset2 = 0;
+        fileSize2 = 0;
         if (!fileName2.isEmpty()) {
             Path path = Paths.get(fileName2);
             if (Files.exists(path)) {
-                lineEnding2 = detectLineEnding(path);
                 try {
-                    for (String line : Files.readAllLines(path))
-                        lines2.add(new StringBuilder(line));
+                    LoadResult r = loadFilePrefix(path, 0, INITIAL_LOAD_BYTES);
+                    lines2.addAll(r.lines());
+                    unreadOffset2 = r.offset();
+                    fileSize2 = r.fileSize();
+                    lineEnding2 = r.lineEnding();
                 } catch (IOException e) {
                     lines2.add(new StringBuilder());
                 }
@@ -2453,17 +2576,27 @@ public class EditorScreen implements AppScreen {
 
     /**
      * Save the active buffer to `activeFileName`, preserving its original CRLF/LF line-ending
-     * style (see `lineEnding`/detectLineEnding()) instead of always writing the platform
-     * default. Writes to a temp file in the same directory first, then atomically renames it
-     * over the target, so a crash or failed write can't leave a truncated or half-written file
-     * in place of the original — the previous version stays intact until the rename succeeds.
-     * Falls back to a plain (non-atomic) replace if the filesystem can't do an atomic rename
-     * (e.g. some network mounts) rather than leaving save permanently broken there. Reports
-     * failure to the user instead of silently swallowing it, as the old version did.
+     * style (see `lineEnding`) instead of always writing the platform default. Writes to a temp
+     * file in the same directory first, then atomically renames it over the target, so a crash
+     * or failed write can't leave a truncated or half-written file in place of the original —
+     * the previous version stays intact until the rename succeeds. Falls back to a plain
+     * (non-atomic) replace if the filesystem can't do an atomic rename (e.g. some network
+     * mounts) rather than leaving save permanently broken there. Reports failure to the user
+     * instead of silently swallowing it, as the old version did.
+     *
+     * If the document is only partially loaded (F3 L; `unreadOffset < fileSize`), the portion
+     * never read into `lines` is carried forward untouched — read directly from the file and
+     * appended after what's written from memory, with the line-boundary newline that was
+     * originally there restored between them (the loaded lines are joined by `lineEnding`
+     * *between* each other, not after the last one, so without this the last loaded line and
+     * the first unread line would silently merge into one) — so saving early can never
+     * truncate or corrupt data the user never got around to loading. `unreadOffset`/`fileSize`
+     * are updated to describe the file as just written, since editing changes its byte layout
+     * (the unread tail's bytes are unchanged, but its offset within the new file usually isn't
+     * the same number as before).
      *
      * Still line-based UTF-8 text, not a byte-safe/binary model — intentional: this editor
-     * targets plain text and source code, not arbitrary binary files (confirmed with the
-     * user), unlike F3 L's incremental loading, which is a real, still-open gap.
+     * targets plain text and source code, not arbitrary binary files (confirmed with the user).
      */
     private void saveFile(Screen screen) throws IOException {
         if (activeFileName.isEmpty()) return;
@@ -2473,16 +2606,38 @@ public class EditorScreen implements AppScreen {
             if (i > 0) content.append(lineEnding);
             content.append(lines.get(i));
         }
-        byte[] bytes = content.toString().getBytes(StandardCharsets.UTF_8);
+        byte[] head = content.toString().getBytes(StandardCharsets.UTF_8);
+
+        byte[] tail = new byte[0];
+        if (unreadOffset < fileSize) {
+            try {
+                tail = readTailBytes(path, unreadOffset);
+            } catch (IOException e) {
+                showMessage(screen, "SAVE FAILED: couldn't read the still-unread part of the file: " + e.getMessage());
+                return;
+            }
+        }
+        // `content` only puts lineEnding BETWEEN lines, not after the last one — but
+        // unreadOffset is always positioned right after a newline in the original file, so
+        // when there's a tail to append, that boundary newline needs restoring or the last
+        // loaded line and the first unread line silently merge into one.
+        byte[] boundary = (tail.length > 0) ? lineEnding.getBytes(StandardCharsets.UTF_8) : new byte[0];
+
         Path dir = (path.getParent() != null) ? path.getParent() : Paths.get(".");
         Path tmp = dir.resolve(path.getFileName().toString() + ".neonorton-tmp");
         try {
-            Files.write(tmp, bytes);
+            try (OutputStream out = Files.newOutputStream(tmp)) {
+                out.write(head);
+                out.write(boundary);
+                out.write(tail);
+            }
             try {
                 Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             } catch (AtomicMoveNotSupportedException notAtomic) {
                 Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
             }
+            fileSize = head.length + boundary.length + tail.length;
+            unreadOffset = head.length + boundary.length;
         } catch (IOException e) {
             try { Files.deleteIfExists(tmp); } catch (IOException ignored) { /* best effort */ }
             showMessage(screen, "SAVE FAILED: " + e.getMessage());
