@@ -46,11 +46,12 @@ import java.util.List;
  * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
  * behavior, F2 status screen (see StatusScreen.StatusInfo), CLI parsing in Main
  * (+LINE, input/output paths, /DA /DB /DC — parsed, though display mode/safe
- * mode/encoding aren't applied to behavior yet, see Main's TODOs).
+ * mode/encoding aren't applied to behavior yet, see Main's TODOs), search &
+ * replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive, Ctrl-Return for a
+ * literal newline in the search string, Y / N / star (replace all) / Space
+ * replace flow — see the "search & replace" section below; literal
+ * byte-for-byte matching only, no regex, as specified).
  * Not yet compliant, see TODOs at each site below:
- *   - Search & replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive,
- *     Y / N / star (replace all) / Space replace flow) is entirely unimplemented
- *     — no keys wired.
  *   - F5 Format, F7 Printer: overlay bars exist but every command is a stub
  *     (their target fields — wrapColumn/tabWidth/indent/printMarginLeft/
  *     printPageLines/outputPath — already exist and feed the F2 status screen;
@@ -133,6 +134,21 @@ public class EditorScreen implements AppScreen {
     // ---- Block markers (pane 2 backing) ----
     private int markerBeginRow2 = -1, markerBeginCol2 = 0;
     private int markerEndRow2   = -1, markerEndCol2   = 0;
+
+    // ---- Search state (Alt-F/Ctrl-F/Alt-C/Ctrl-C) ----
+    // The active search string (may contain '\n' via Ctrl-Return); null = no search yet.
+    private String lastSearchTerm = null;
+    // Set when the term was entered by pressing ESC instead of Enter (spec: ESC during term
+    // entry means case-insensitive ASCII a-z matching).
+    private boolean lastSearchCaseInsensitive = false;
+    // True after Alt-F's/Ctrl-F's term-entry step, until a replace session runs and consumes
+    // it. Pressing the SAME direction key again while pending prompts for a replacement and
+    // starts the Y/N/*/Space replace loop, per the spec's two-step search-and-replace flow.
+    private boolean forwardFindPending = false;
+    private boolean reverseFindPending = false;
+
+    /** Result of promptTextLine(): the text typed, and whether it was finished via ESC. */
+    private record TextInput(String text, boolean escaped) {}
 
     public EditorScreen(String fileName) {
         this.fileName = fileName;
@@ -326,7 +342,7 @@ public class EditorScreen implements AppScreen {
         }
     }
 
-    private void handleKey(KeyStroke key, Screen screen) {
+    private void handleKey(KeyStroke key, Screen screen) throws IOException {
         KeyType type = key.getKeyType();
         TerminalSize size = screen.getTerminalSize();
         int textRows;
@@ -346,19 +362,8 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineBegin();
                         case 'u' -> undoLastDelete();
                         case 'v' -> toggleCaseToLineBegin();
-                        // TODO: Ctrl-F, reverse find (continue). Needs a new search.c-equivalent:
-                        // a `lastSearchTerm`/`lastSearchCaseSensitive` pair of fields set by a
-                        // search-entry prompt (goToLineNumber()-style single-line input, but
-                        // ESC during entry sets case-insensitive instead of canceling, and
-                        // Ctrl-Return inserts a literal newline into the term). Ctrl-F with no
-                        // prior term should prompt for one (reverse direction) and jump the
-                        // cursor to the first match at/before the cursor; show "SEARCH STRING
-                        // NOT FOUND" on failure.
-                        case 'f' -> { /* TODO: reverse find */ }
-                        // TODO: Ctrl-C, continue reverse search. Requires 'f' above to exist
-                        // first (shares `lastSearchTerm`); repeats the same reverse match
-                        // starting one position before the current cursor, non-overlapping.
-                        case 'c' -> { /* TODO: continue reverse search */ }
+                        case 'f' -> searchReverse(screen);
+                        case 'c' -> continueReverse(screen);
                         // TODO: Ctrl-P, insert literal/extended byte. Prompt for a raw
                         // byte/codepoint (e.g. two hex digits) and insert it directly into the
                         // current line via `lines.get(cursorRow).insert(cursorCol, ch)` the same
@@ -373,18 +378,8 @@ public class EditorScreen implements AppScreen {
                         case 'l' -> deleteToLineEnd();
                         case 'k' -> killLine();
                         case 'v' -> toggleCaseToLineEnd();
-                        // TODO: Alt-F, forward find. Same search-entry prompt as Ctrl-F (see its
-                        // TODO above) but scanning forward from just after the cursor; store the
-                        // term/case-sensitivity in the same `lastSearchTerm` fields so Ctrl-F,
-                        // Alt-C and Ctrl-C can all reuse it. After a match, entering find again
-                        // in the same direction with the SAME term should instead prompt for a
-                        // replacement string and start the Y/N/*/Space replace loop described in
-                        // the class-level compliance comment.
-                        case 'f' -> { /* TODO: forward find */ }
-                        // TODO: Alt-C, continue forward search. Repeats the last forward match
-                        // starting one position after the current cursor, non-overlapping with
-                        // the previous match; show "SEARCH STRING NOT FOUND" when exhausted.
-                        case 'c' -> { /* TODO: continue forward search */ }
+                        case 'f' -> searchForward(screen);
+                        case 'c' -> continueForward(screen);
                         default  -> {}
                     }
                 } else {
@@ -532,6 +527,357 @@ public class EditorScreen implements AppScreen {
         } else if (cursorRow >= scrollRow + textRows) {
             scrollRow = cursorRow - textRows + 1;
         }
+    }
+
+    // ------------------------------------------------------------------ search & replace
+
+    /** Alt-F: forward find, or — if a term is already pending on this direction — prompt for a
+     *  replacement and run the forward replace loop (the spec's two-step search-and-replace:
+     *  invoking the same direction key twice turns "find" into "find & replace"). */
+    private void searchForward(Screen screen) throws IOException {
+        if (!forwardFindPending) {
+            TextInput in = promptTextLine(screen, "Search (forward), ESC = case-insensitive:");
+            if (in.text().isEmpty()) return;
+            lastSearchTerm = in.text();
+            lastSearchCaseInsensitive = in.escaped();
+            forwardFindPending = true;
+            reverseFindPending = false;
+            runFind(screen, true, false);
+        } else {
+            runReplace(screen, true);
+            forwardFindPending = false;
+            reverseFindPending = false;
+        }
+    }
+
+    /** Ctrl-F: reverse find / start a reverse replace session — mirror of searchForward(). */
+    private void searchReverse(Screen screen) throws IOException {
+        if (!reverseFindPending) {
+            TextInput in = promptTextLine(screen, "Search (reverse), ESC = case-insensitive:");
+            if (in.text().isEmpty()) return;
+            lastSearchTerm = in.text();
+            lastSearchCaseInsensitive = in.escaped();
+            reverseFindPending = true;
+            forwardFindPending = false;
+            runFind(screen, false, false);
+        } else {
+            runReplace(screen, false);
+            forwardFindPending = false;
+            reverseFindPending = false;
+        }
+    }
+
+    /** Alt-C: repeat the last forward find, non-overlapping with the current cursor position. */
+    private void continueForward(Screen screen) throws IOException {
+        if (lastSearchTerm == null) { showMessage(screen, "NO PREVIOUS SEARCH"); return; }
+        runFind(screen, true, true);
+    }
+
+    /** Ctrl-C: repeat the last reverse find, non-overlapping with the current cursor position. */
+    private void continueReverse(Screen screen) throws IOException {
+        if (lastSearchTerm == null) { showMessage(screen, "NO PREVIOUS SEARCH"); return; }
+        runFind(screen, false, true);
+    }
+
+    /** Move the cursor to the next/previous match of lastSearchTerm. A fresh find starts AT the
+     *  cursor (advanceFirst = false); "continue" starts one position past the cursor so it can
+     *  never re-match what's already selected (advanceFirst = true). */
+    private void runFind(Screen screen, boolean forward, boolean advanceFirst) throws IOException {
+        int row = cursorRow, col = cursorCol;
+        if (advanceFirst) {
+            if (forward) {
+                col++;
+                if (col > lines.get(row).length()) {
+                    row++; col = 0;
+                    if (row >= lines.size()) { showMessage(screen, "SEARCH STRING NOT FOUND"); return; }
+                }
+            } else {
+                col--;
+                if (col < 0) {
+                    row--;
+                    if (row < 0) { showMessage(screen, "SEARCH STRING NOT FOUND"); return; }
+                    col = lines.get(row).length();
+                }
+            }
+        }
+        int[] m = forward
+                ? findForward(lines, lastSearchTerm, lastSearchCaseInsensitive, row, col)
+                : findReverse(lines, lastSearchTerm, lastSearchCaseInsensitive, row, col);
+        if (m == null) { showMessage(screen, "SEARCH STRING NOT FOUND"); return; }
+        moveCursorTo(screen, m[0], m[1]);
+    }
+
+    /** Prompt for a replacement string, then walk matches of lastSearchTerm from the cursor in
+     *  the given direction, replacing per the classic Y (replace, continue) / N (skip, continue)
+     *  / * (replace this and all remaining without asking) / Space (stop) prompt. */
+    private void runReplace(Screen screen, boolean forward) throws IOException {
+        if (lastSearchTerm == null || lastSearchTerm.isEmpty()) {
+            showMessage(screen, "INVALID SEARCH & REPLACE ARGUMENTS");
+            return;
+        }
+        TextInput in = promptTextLine(screen, "Replace with:");
+        String replacement = in.text();
+
+        boolean replaceAll = false;
+        boolean any = false;
+        int row = cursorRow, col = cursorCol;
+        while (true) {
+            int[] m = forward
+                    ? findForward(lines, lastSearchTerm, lastSearchCaseInsensitive, row, col)
+                    : findReverse(lines, lastSearchTerm, lastSearchCaseInsensitive, row, col);
+            if (m == null) {
+                if (!any) showMessage(screen, "SEARCH STRING NOT FOUND");
+                return;
+            }
+            moveCursorTo(screen, m[0], m[1]);
+            redraw(screen); // show the match before asking what to do with it
+
+            boolean doReplace;
+            if (replaceAll) {
+                doReplace = true;
+            } else {
+                char resp = promptReplaceAction(screen);
+                if (resp == ' ') return; // quit
+                if (resp == '*') { replaceAll = true; doReplace = true; }
+                else doReplace = (resp == 'y');
+            }
+
+            if (doReplace) {
+                saveUndo();
+                int[] end = replaceMatch(m[0], m[1], m[2], m[3], replacement);
+                any = true;
+                row = end[0]; col = end[1];
+                if (!forward) {
+                    // continue scanning backward from just before the inserted replacement
+                    col--;
+                    if (col < 0) {
+                        row--;
+                        if (row < 0) return;
+                        col = lines.get(row).length();
+                    }
+                }
+            } else {
+                // skip this match without replacing, non-overlapping with it
+                if (forward) {
+                    row = m[2]; col = m[3];
+                } else {
+                    col = m[1] - 1;
+                    if (col < 0) {
+                        row = m[0] - 1;
+                        if (row < 0) return;
+                        col = lines.get(row).length();
+                    }
+                }
+            }
+        }
+    }
+
+    /** Show the classic replace prompt and return the response: 'y', 'n', '*', or ' ' (quit). */
+    private char promptReplaceAction(Screen screen) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int row  = (splitMode && activePane == 1) ? 13 : 0;
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, row, String.format("%-" + cols + "s", "Replace?  Y=yes  N=no  *=all  Space=quit"));
+        screen.setCursorPosition(null);
+        screen.refresh();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() != KeyType.Character) continue;
+            char ch = k.getCharacter();
+            if (ch == ' ' || ch == '*') return ch;
+            char lower = Character.toLowerCase(ch);
+            if (lower == 'y' || lower == 'n') return lower;
+        }
+    }
+
+    /** Move the cursor to (row, col) and scroll it into view, mirroring handleKey's own
+     *  end-of-method scroll adjustment (recomputed here since it's called from other methods). */
+    private void moveCursorTo(Screen screen, int row, int col) {
+        cursorRow = row;
+        cursorCol = col;
+        int textRows = splitMode
+                ? ((activePane == 0) ? 12 : screen.getTerminalSize().getRows() - 13)
+                : screen.getTerminalSize().getRows() - 1;
+        if (cursorRow < scrollRow) scrollRow = cursorRow;
+        else if (cursorRow >= scrollRow + textRows) scrollRow = cursorRow - textRows + 1;
+    }
+
+    /** Show a one-line message on the prompt row and wait for any keypress to dismiss it. */
+    private void showMessage(Screen screen, String msg) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int row  = (splitMode && activePane == 1) ? 13 : 0;
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, row, String.format("%-" + cols + "s", msg + "  (press any key)"));
+        screen.setCursorPosition(null);
+        screen.refresh();
+        screen.readInput();
+    }
+
+    /**
+     * Draws a 3-row prompt (label / input / rule), matching goToLineNumber()'s layout, and reads
+     * a line of text. Backspace deletes; Ctrl-Return inserts a literal '\n' (shown as '¶' in
+     * the input preview) without finishing entry — this is the spec's "search string may include
+     * newline via Ctrl-Return"; Enter finishes normally; Escape finishes too, reported via
+     * TextInput.escaped (search-term entry uses this to mean "case-insensitive", per spec).
+     */
+    private TextInput promptTextLine(Screen screen, String label) throws IOException {
+        int cols      = screen.getTerminalSize().getColumns();
+        int promptRow = (splitMode && activePane == 1) ? 13 : 0;
+        int inputRow  = promptRow + 1;
+        int ruleRow   = promptRow + 2;
+
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, promptRow, String.format("%-" + cols + "s", label));
+        tg.putString(0, inputRow,  String.format("%-" + cols + "s", ""));
+        tg.putString(0, ruleRow,   "─".repeat(cols));
+        screen.setCursorPosition(new TerminalPosition(0, inputRow));
+        screen.refresh();
+
+        StringBuilder text = new StringBuilder();
+        boolean escaped = false;
+        while (true) {
+            KeyStroke k = screen.readInput();
+            KeyType t = k.getKeyType();
+            if (t == KeyType.Enter && k.isCtrlDown()) {
+                text.append('\n');
+            } else if (t == KeyType.Enter) {
+                break;
+            } else if (t == KeyType.Escape) {
+                escaped = true;
+                break;
+            } else if (t == KeyType.Backspace) {
+                if (text.length() > 0) text.deleteCharAt(text.length() - 1);
+            } else if (t == KeyType.Character && !k.isCtrlDown() && !k.isAltDown()) {
+                text.append(k.getCharacter());
+            }
+            String display = text.toString().replace('\n', '¶');
+            String shown = display.length() > cols ? display.substring(display.length() - cols) : display;
+            tg.putString(0, inputRow, String.format("%-" + cols + "s", shown));
+            screen.setCursorPosition(new TerminalPosition(shown.length(), inputRow));
+            screen.refresh();
+        }
+        return new TextInput(text.toString(), escaped);
+    }
+
+    /** ASCII-only case fold (a-z -> A-Z) — the spec's confirmed case-insensitive matching rule. */
+    private static String foldAsciiUpper(String s) {
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            out.append(c >= 'a' && c <= 'z' ? (char) (c - 32) : c);
+        }
+        return out.toString();
+    }
+
+    /**
+     * Tests whether `term` (pre-split on '\n' into termLines) matches `paneLines` starting at
+     * (row, col). A multi-line term requires each embedded newline to land on a real line
+     * boundary: every segment before the last must run exactly to the end of its line, and the
+     * final segment matches as a prefix of its line. Returns the position just past the match
+     * as {endRow, endCol}, or null if it doesn't match here.
+     */
+    private int[] matchAt(List<StringBuilder> paneLines, int row, int col, String[] termLines,
+                           boolean caseInsensitive) {
+        for (int i = 0; i < termLines.length; i++) {
+            int r = row + i;
+            if (r >= paneLines.size()) return null;
+            String line = paneLines.get(r).toString();
+            int startCol = (i == 0) ? col : 0;
+            if (startCol > line.length()) return null;
+            String hay    = caseInsensitive ? foldAsciiUpper(line)          : line;
+            String needle = caseInsensitive ? foldAsciiUpper(termLines[i])  : termLines[i];
+            boolean lastSeg = (i == termLines.length - 1);
+            if (lastSeg) {
+                if (startCol + needle.length() > hay.length()) return null;
+                if (!hay.regionMatches(startCol, needle, 0, needle.length())) return null;
+                return new int[]{ r, startCol + needle.length() };
+            } else {
+                // a segment before an embedded newline must consume the rest of this line
+                if (hay.length() - startCol != needle.length()) return null;
+                if (!hay.regionMatches(startCol, needle, 0, needle.length())) return null;
+            }
+        }
+        return null; // unreachable (termLines always has at least one element)
+    }
+
+    /** Forward scan for `term` starting at/after (fromRow, fromCol). Returns {matchRow, matchCol,
+     *  endRow, endCol}, or null if not found. */
+    private int[] findForward(List<StringBuilder> paneLines, String term, boolean caseInsensitive,
+                               int fromRow, int fromCol) {
+        if (term == null || term.isEmpty()) return null;
+        String[] termLines = term.split("\n", -1);
+        for (int r = fromRow; r < paneLines.size(); r++) {
+            int startC = (r == fromRow) ? fromCol : 0;
+            int lineLen = paneLines.get(r).length();
+            for (int c = startC; c <= lineLen; c++) {
+                int[] end = matchAt(paneLines, r, c, termLines, caseInsensitive);
+                if (end != null) return new int[]{ r, c, end[0], end[1] };
+            }
+        }
+        return null;
+    }
+
+    /** Reverse scan for `term`: the match whose START position is nearest to, and not after,
+     *  (fromRow, fromCol). Returns {matchRow, matchCol, endRow, endCol}, or null if not found. */
+    private int[] findReverse(List<StringBuilder> paneLines, String term, boolean caseInsensitive,
+                               int fromRow, int fromCol) {
+        if (term == null || term.isEmpty()) return null;
+        String[] termLines = term.split("\n", -1);
+        for (int r = fromRow; r >= 0; r--) {
+            int startC = (r == fromRow) ? fromCol : paneLines.get(r).length();
+            for (int c = startC; c >= 0; c--) {
+                int[] end = matchAt(paneLines, r, c, termLines, caseInsensitive);
+                if (end != null) return new int[]{ r, c, end[0], end[1] };
+            }
+        }
+        return null;
+    }
+
+    /** Delete lines[beginRow:beginCol .. endRow:endCol) in place. Independent of the F4 block
+     *  markers on purpose — search & replace must not disturb the user's own block selection. */
+    private void deleteRange(int beginRow, int beginCol, int endRow, int endCol) {
+        if (beginRow == endRow) {
+            lines.get(beginRow).delete(beginCol, endCol);
+        } else {
+            String prefix = lines.get(beginRow).substring(0, beginCol);
+            String suffix = lines.get(endRow).substring(endCol);
+            lines.get(beginRow).setLength(0);
+            lines.get(beginRow).append(prefix).append(suffix);
+            for (int r = endRow; r > beginRow; r--) lines.remove(r);
+        }
+    }
+
+    /** Insert `text` (may contain '\n') at (row, col). Returns the position just past it. */
+    private int[] insertTextAt(int row, int col, String text) {
+        String[] parts = text.split("\n", -1);
+        StringBuilder target = lines.get(row);
+        String after = target.substring(col);
+        target.setLength(col);
+        target.append(parts[0]);
+        if (parts.length == 1) {
+            target.append(after);
+            return new int[]{ row, col + parts[0].length() };
+        }
+        for (int i = 1; i < parts.length - 1; i++) {
+            lines.add(row + i, new StringBuilder(parts[i]));
+        }
+        int lastIdx = row + parts.length - 1;
+        String lastPart = parts[parts.length - 1];
+        lines.add(lastIdx, new StringBuilder(lastPart + after));
+        return new int[]{ lastIdx, lastPart.length() };
+    }
+
+    /** Replace lines[beginRow:beginCol .. endRow:endCol) with `replacement`. Returns the
+     *  position just past the inserted replacement text. */
+    private int[] replaceMatch(int beginRow, int beginCol, int endRow, int endCol, String replacement) {
+        deleteRange(beginRow, beginCol, endRow, endCol);
+        return insertTextAt(beginRow, beginCol, replacement);
     }
 
     private void redraw(Screen screen) throws IOException {
