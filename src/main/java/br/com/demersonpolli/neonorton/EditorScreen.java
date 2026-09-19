@@ -54,8 +54,8 @@ import java.util.List;
  * specification"). Compliant: cursor family, Backspace/Del/Ctrl-W/Alt-W/Ctrl-L/
  * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
  * behavior, F2 status screen (see StatusScreen.StatusInfo), CLI parsing in Main
- * (+LINE, input/output paths, /DA /DB /DC — parsed and applied; safe mode/
- * encoding are still unapplied, see Main's TODOs), search & replace
+ * (+LINE, input/output paths, /DA /DB /DC — parsed and applied; --safe/--encoding are parsed
+ * but effectively no-ops now, see Main.CommandLineArgs's comments on why), search & replace
  * (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive, Ctrl-Return for a literal
  * newline in the search string, Y / N / star (replace all) / Space replace
  * flow — see the "search & replace" section below; literal byte-for-byte
@@ -113,12 +113,15 @@ import java.util.List;
  * leave a truncated file in place of the original, falling back to a plain replace if the
  * filesystem can't do an atomic rename. Failures are reported to the user instead of silently
  * swallowed.
+ * Scope note: this editor targets plain text / source code, not arbitrary binary files — a
+ * byte-safe document model (the spec's "byte/legacy encoding mode") is intentionally out of
+ * scope, confirmed with the user, not a gap to fill later. The line-based UTF-8 String model
+ * (List<StringBuilder> lines) is the permanent design here.
  * Not yet compliant, see TODOs at each site below:
- *   - File I/O is still line-based UTF-8 text (Files.readAllLines/write), not a binary/byte-
- *     safe model, and load doesn't do incremental/partial loading for very large files — both
- *     are much larger architectural changes (rewriting the document model around bytes rather
- *     than Java Strings) than the save-path fixes above, not attempted here. See F3 L's own
- *     note for the same "this needs a real FileSource, not a save-time fix" boundary.
+ *   - Load doesn't do incremental/partial loading for very large text files — a real
+ *     FileSource (offset + remaining-byte tracking, F3 L loading the next chunk) would be a
+ *     much larger architectural change than the save-path fixes above, not attempted here; F3
+ *     L's own note covers the same boundary.
  */
 public class EditorScreen implements AppScreen {
 
@@ -2454,9 +2457,9 @@ public class EditorScreen implements AppScreen {
      * (e.g. some network mounts) rather than leaving save permanently broken there. Reports
      * failure to the user instead of silently swallowing it, as the old version did.
      *
-     * Still line-based UTF-8 text, not a byte-safe/binary model — that's a much larger,
-     * separately-scoped architectural change (same category as F3 L's incremental loading),
-     * not attempted here.
+     * Still line-based UTF-8 text, not a byte-safe/binary model — intentional: this editor
+     * targets plain text and source code, not arbitrary binary files (confirmed with the
+     * user), unlike F3 L's incremental loading, which is a real, still-open gap.
      */
     private void saveFile(Screen screen) throws IOException {
         if (activeFileName.isEmpty()) return;

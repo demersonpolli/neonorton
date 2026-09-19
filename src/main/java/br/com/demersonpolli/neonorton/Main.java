@@ -45,25 +45,26 @@ public class Main {
     static class CommandLineArgs {
         int startLine = 0;
         String inputPath = null;
-        // outputPath now reaches EditorScreen via setOutputPath() below (its target, F3 W
-        // "write through cursor", is still a stub — see EditorScreen's TODO on that case).
+        // outputPath now reaches EditorScreen via setOutputPath() below, and F3 W "write
+        // through cursor" is fully implemented (writes lines[0..cursor) to it).
         String outputPath = null;
         // displayMode now reaches EditorScreen via setDisplayMode() below, applied after
         // EditorConfig's saved value so an explicit CLI flag always wins over a saved default.
         String displayMode = null; // "da", "db", "dc"
-        // TODO: safeMode is parsed but never applied. This should gate the "Portable-safe"
-        // behaviors from the spec's compatibility-level contract: atomic save-via-temp-file
-        // (see saveFile()'s TODO), Unicode-safe rendering instead of caret-notation control
-        // bytes, and requiring an explicit confirmation before the still-unimplemented F9
-        // shell command runs. Store it on EditorScreen and branch on it at each of those
-        // sites rather than only in Main.
+        // safeMode is parsed but still unused — and, unlike outputPath/displayMode above, there
+        // isn't really anything left for it to gate. The spec's "Portable-safe" behaviors it was
+        // meant to opt into are now unconditional defaults instead: saveFile() always does an
+        // atomic save, and F9 always Y/N-confirms before opening a shell. Its third behavior
+        // (Unicode-safe rendering vs. caret-notation control bytes) doesn't apply either — this
+        // editor targets plain text/source code, not arbitrary binary files, by design (see
+        // EditorScreen's class-level compliance note), so there's no byte/caret-notation mode to
+        // toggle into in the first place. Kept accepting the flag for CLI compatibility; it's
+        // effectively a no-op now rather than a pending TODO.
         boolean safeMode = false;
-        // TODO: encoding is parsed but never applied — the document model (List<StringBuilder>
-        // of Java Strings, i.e. UTF-16 code units) has no byte/legacy mode at all, so "bytes"
-        // is currently indistinguishable from "utf8". Implementing this for real means changing
-        // how EditorScreen reads/writes files (see saveFile()'s TODO on binary-safe I/O) to
-        // read raw bytes and render non-UTF-8/control bytes in caret notation when
-        // encoding.equals("bytes"), instead of always decoding as UTF-8 text.
+        // encoding is parsed but unused, for the same reason as safeMode above: the document
+        // model is deliberately plain-text/UTF-8 (List<StringBuilder> of Java Strings), not a
+        // byte-oriented model, so there's no "bytes" mode to switch into. Kept accepting the
+        // flag for CLI compatibility.
         String encoding = "utf8"; // "bytes" or "utf8"
     }
 
