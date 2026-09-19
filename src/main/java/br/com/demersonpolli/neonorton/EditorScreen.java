@@ -148,9 +148,8 @@ public class EditorScreen implements AppScreen {
     private boolean wordWrap   = false;  // true = WW=On, false = WW=Off
     private boolean indent     = false;  // F5 I: auto-indent — Enter copies the current line's leading whitespace
 
-    // Format/print/tab configuration — these are the F5/F7 command targets. The fields exist
-    // now (for the F2 status screen) with sensible defaults; F7 still needs to let the user
-    // change its fields interactively, see the TODOs on its handler method below.
+    // Format/print/tab configuration — the F5/F7 command targets, all interactively settable
+    // now (F5 L/T, F7 S/M) and shown on the F2 status screen.
     private int wrapColumn      = 0;   // F5 L: format/word-wrap line length; 0 = off/unset
     private int tabWidth        = 8;   // F5 T: tab display width
     private int printMarginLeft = 0;   // F7 M: left margin for printing
