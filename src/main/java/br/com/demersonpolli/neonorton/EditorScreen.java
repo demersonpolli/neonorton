@@ -36,9 +36,12 @@ import com.googlecode.lanterna.terminal.swing.TerminalEmulatorDeviceConfiguratio
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
@@ -100,19 +103,32 @@ import java.util.List;
  * other command still gets its own checkpoint). Each checkpoint is a full-buffer snapshot, not
  * a per-line diff — a simplicity/memory tradeoff reasonable at this editor's scale, not
  * literally unbounded (capped, oldest entries evicted first).
+ * Rendering now expands tabs for display (expandTabsForDisplay()) and maps every document
+ * column used on screen — cursor position, block-marker boundaries — through
+ * docColToScreenCol(), so Tab's LITERAL mode no longer visually misaligns anything after it;
+ * this closes what was previously a documented renderer gap.
+ * File I/O (saveFile()) now preserves the original file's CRLF/LF line-ending style
+ * (detectLineEnding()) instead of always writing the platform default, and saves via a
+ * write-to-temp-then-atomic-rename in the same directory so a crash or failed write can't
+ * leave a truncated file in place of the original, falling back to a plain replace if the
+ * filesystem can't do an atomic rename. Failures are reported to the user instead of silently
+ * swallowed.
  * Not yet compliant, see TODOs at each site below:
- *   - Tab's LITERAL mode inserts a real '\t' byte but the renderer
- *     (drawTextPane) does no column-width expansion for it, so a literal tab
- *     will visually misalign — a pre-existing renderer limitation, not fixed
- *     here; SPACES/MOVE modes (the default) have no such issue.
- *   - File I/O is line-based UTF-8 text (Files.readAllLines/write): no CRLF
- *     preservation, no binary/byte-safe mode, no atomic save, no incremental
- *     load for large files.
+ *   - File I/O is still line-based UTF-8 text (Files.readAllLines/write), not a binary/byte-
+ *     safe model, and load doesn't do incremental/partial loading for very large files — both
+ *     are much larger architectural changes (rewriting the document model around bytes rather
+ *     than Java Strings) than the save-path fixes above, not attempted here. See F3 L's own
+ *     note for the same "this needs a real FileSource, not a save-time fix" boundary.
  */
 public class EditorScreen implements AppScreen {
 
     private final String fileName;
     private String activeFileName; // mutable; always the active pane's filename
+
+    // Line-ending style ("\r\n" or "\n") detected from the loaded file, preserved on save
+    // instead of always writing the platform default. Per-pane like activeFileName/fileName2.
+    private String lineEnding  = System.lineSeparator();
+    private String lineEnding2 = System.lineSeparator();
 
     // Lines of text in the document
     private List<StringBuilder> lines = new ArrayList<>();
@@ -139,7 +155,7 @@ public class EditorScreen implements AppScreen {
 
     /** F5 T's 3 tab modes (spec: "Editing semantics" / tab configuration dialog). */
     private enum TabMode { LITERAL, SPACES, MOVE }
-    private TabMode tabMode = TabMode.SPACES; // default avoids the LITERAL mode's rendering caveat, see handleKey's Tab case
+    private TabMode tabMode = TabMode.SPACES; // default; see handleKey's Tab case
 
     /** F5 D's 3 display themes (CLI's /DA /DB /DC). Palette values aren't recoverable from the
      *  spec's listing, so these are a design choice; only the document-text foreground changes
@@ -230,12 +246,30 @@ public class EditorScreen implements AppScreen {
     /** Result of promptTextLine(): the text typed, and whether it was finished via ESC. */
     private record TextInput(String text, boolean escaped) {}
 
+    /** Detects whether `path`'s content uses CRLF or bare LF line endings, from the first
+     *  newline actually found in its raw bytes. Falls back to the platform default for a
+     *  new, empty, or unreadable file — there's nothing to preserve in that case anyway. */
+    private static String detectLineEnding(Path path) {
+        try {
+            byte[] bytes = Files.readAllBytes(path);
+            for (int i = 0; i < bytes.length; i++) {
+                if (bytes[i] == '\n') {
+                    return (i > 0 && bytes[i - 1] == '\r') ? "\r\n" : "\n";
+                }
+            }
+        } catch (IOException e) {
+            // fall through to the platform default
+        }
+        return System.lineSeparator();
+    }
+
     public EditorScreen(String fileName) {
         this.fileName = fileName;
         this.activeFileName = fileName;
         if (!fileName.isEmpty()) {
             Path path = Paths.get(fileName);
             if (Files.exists(path)) {
+                lineEnding = detectLineEnding(path);
                 try {
                     List<String> fileLines = Files.readAllLines(path);
                     for (String line : fileLines) {
@@ -1112,6 +1146,37 @@ public class EditorScreen implements AppScreen {
         return insertTextAt(beginRow, beginCol, replacement);
     }
 
+    /** Expands '\t' in `line` to spaces (to the next `tabWidth` stop), for DISPLAY only — the
+     *  stored document character stays a literal tab; only rendering and the screen-column
+     *  helpers below go through this. Closes the Tab LITERAL-mode rendering gap: previously
+     *  drawTextPane rendered raw tab bytes 1:1 with no column-width expansion, visually
+     *  misaligning everything after a literal tab. */
+    private String expandTabsForDisplay(String line) {
+        if (line.indexOf('\t') < 0) return line; // fast path: no tabs, nothing to expand
+        StringBuilder out = new StringBuilder(line.length());
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '\t') {
+                out.append(" ".repeat(tabWidth - (out.length() % tabWidth)));
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    /** Converts a document character index (`docCol`, as used everywhere else — cursor
+     *  position, block markers, search results) into the corresponding screen column in
+     *  `line`'s expanded display form, accounting for tab expansion. */
+    private int docColToScreenCol(String line, int docCol) {
+        int screenCol = 0;
+        int limit = Math.min(docCol, line.length());
+        for (int i = 0; i < limit; i++) {
+            screenCol += (line.charAt(i) == '\t') ? tabWidth - (screenCol % tabWidth) : 1;
+        }
+        return screenCol;
+    }
+
     private void redraw(Screen screen) throws IOException {
         TerminalSize size = screen.getTerminalSize();
         int rows = size.getRows();
@@ -1129,7 +1194,7 @@ public class EditorScreen implements AppScreen {
             updateStatusBar();
             statusBar.render(screen);
             int screenRow = cursorRow - scrollRow;
-            int screenCol = Math.min(cursorCol, cols - 1);
+            int screenCol = Math.min(docColToScreenCol(lines.get(cursorRow).toString(), cursorCol), cols - 1);
             screen.setCursorPosition(new TerminalPosition(screenCol, screenRow));
         } else {
             // ---- Split-pane mode ----
@@ -1145,11 +1210,11 @@ public class EditorScreen implements AppScreen {
             // Cursor in the active pane
             if (activePane == 0) {
                 int screenRow = Math.min(cursorRow - scrollRow, 11);
-                int screenCol = Math.min(cursorCol, cols - 1);
+                int screenCol = Math.min(docColToScreenCol(lines.get(cursorRow).toString(), cursorCol), cols - 1);
                 screen.setCursorPosition(new TerminalPosition(screenCol, screenRow));
             } else {
                 int screenRow = 13 + Math.min(cursorRow2 - scrollRow2, pane2Rows - 1);
-                int screenCol = Math.min(cursorCol2, cols - 1);
+                int screenCol = Math.min(docColToScreenCol(lines2.get(cursorRow2).toString(), cursorCol2), cols - 1);
                 screen.setCursorPosition(new TerminalPosition(screenCol, screenRow));
             }
         }
@@ -1169,9 +1234,20 @@ public class EditorScreen implements AppScreen {
         boolean hasFull  = bRow >= 0 && eRow >= 0;
         boolean hasBegin = bRow >= 0;
 
+        // Marker columns are document character indices; convert to screen columns (tab
+        // expansion can make them differ) using each marker's own row content.
+        int bColScreen = bCol, eColScreen = eCol;
+        if (hasBegin && bRow < paneLines.size()) {
+            bColScreen = docColToScreenCol(paneLines.get(bRow).toString(), bCol);
+        }
+        if (eRow >= 0 && eRow < paneLines.size()) {
+            eColScreen = docColToScreenCol(paneLines.get(eRow).toString(), eCol);
+        }
+
         for (int r = 0; r < screenRowCount; r++) {
             int docRow = r + paneScroll;
-            String text = (docRow < paneLines.size()) ? paneLines.get(docRow).toString() : "";
+            String rawText = (docRow < paneLines.size()) ? paneLines.get(docRow).toString() : "";
+            String text = expandTabsForDisplay(rawText);
             String padded = String.format("%-" + cols + "s",
                     text.length() > cols ? text.substring(0, cols) : text);
             int screenRow = screenRowStart + r;
@@ -1181,31 +1257,33 @@ public class EditorScreen implements AppScreen {
                 tg.setForegroundColor(displayMode.foreground);
                 tg.setBackgroundColor(TextColor.ANSI.BLACK);
                 tg.putString(0, screenRow, padded);
-                if (hasBegin && docRow == bRow && bCol < cols) {
+                if (hasBegin && docRow == bRow && bColScreen < cols) {
                     tg.setForegroundColor(TextColor.ANSI.BLACK);
                     tg.setBackgroundColor(TextColor.ANSI.YELLOW);
-                    tg.putString(bCol, screenRow, String.valueOf(padded.charAt(bCol)));
+                    tg.putString(bColScreen, screenRow, String.valueOf(padded.charAt(bColScreen)));
                 }
             } else {
-                // Char-by-char: block region = cyan, boundary chars = yellow
+                // Char-by-char: block region = cyan, boundary chars = yellow. Compares against
+                // the SCREEN-column marker positions (bColScreen/eColScreen), since `c` here is
+                // a screen column and tab expansion can shift it away from the raw bCol/eCol.
                 for (int c = 0; c < cols; c++) {
                     boolean inBlock;
                     if (docRow < bRow || docRow > eRow) {
                         inBlock = false;
                     } else if (docRow == bRow && docRow == eRow) {
-                        inBlock = c >= bCol && c < eCol;
+                        inBlock = c >= bColScreen && c < eColScreen;
                     } else if (docRow == bRow) {
-                        inBlock = c >= bCol;
+                        inBlock = c >= bColScreen;
                     } else if (docRow == eRow) {
-                        inBlock = c < eCol;
+                        inBlock = c < eColScreen;
                     } else {
                         inBlock = true;
                     }
 
-                    // Boundary: first char of selection (bRow/bCol) or last char (eRow/eCol-1)
-                    boolean isBeginChar = docRow == bRow && c == bCol;
-                    boolean isEndChar   = docRow == eRow && c == eCol - 1 && eCol > bCol || // same-row guard
-                                         docRow == eRow && c == eCol - 1 && !(docRow == bRow && eCol <= bCol);
+                    // Boundary: first char of selection (bRow/bColScreen) or last char (eRow/eColScreen-1)
+                    boolean isBeginChar = docRow == bRow && c == bColScreen;
+                    boolean isEndChar   = docRow == eRow && c == eColScreen - 1 && eColScreen > bColScreen || // same-row guard
+                                         docRow == eRow && c == eColScreen - 1 && !(docRow == bRow && eColScreen <= bColScreen);
 
                     TextColor bg = inBlock
                             ? (isBeginChar || isEndChar ? TextColor.ANSI.YELLOW : TextColor.ANSI.CYAN)
@@ -1953,11 +2031,11 @@ public class EditorScreen implements AppScreen {
         switch (Character.toLowerCase(key.getCharacter())) {
             case 'q' -> confirmQuit(screen);                 // Quit with confirmation
             case 'e' -> {                                       // Exit-with-save (or close pane in split)
-                saveFile();
+                saveFile(screen);
                 if (splitMode) closeSplitPane(screen);
                 else shouldQuit = true;
             }
-            case 's' -> saveFile();                           // Save
+            case 's' -> saveFile(screen);                     // Save
             case 'x' -> {                                      // Split or switch panes
                 if (splitMode) activePane = 1 - activePane;
                 else enterSplitMode(screen, gui);
@@ -2059,7 +2137,7 @@ public class EditorScreen implements AppScreen {
         }
 
         if (choice == 'n') return;
-        if (choice == 'e') saveFile();
+        if (choice == 'e') saveFile(screen);
         // E or Q: prompt for new filename
 
         tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
@@ -2090,9 +2168,11 @@ public class EditorScreen implements AppScreen {
         // Load new file into active pane's live buffer
         String newName = nameBuilder.toString().trim();
         lines.clear();
+        lineEnding = System.lineSeparator();
         if (!newName.isEmpty()) {
             Path path = Paths.get(newName);
             if (Files.exists(path)) {
+                lineEnding = detectLineEnding(path);
                 try {
                     for (String line : Files.readAllLines(path))
                         lines.add(new StringBuilder(line));
@@ -2149,6 +2229,7 @@ public class EditorScreen implements AppScreen {
         scrollRow    = scrollRow2;   scrollRow2  = 0;
         insertMode   = insertMode2;  insertMode2 = true;
         activeFileName = fileName2;  fileName2   = "";
+        lineEnding   = lineEnding2;  lineEnding2 = System.lineSeparator();
         undoStack    = undoStack2;   undoStack2  = new ArrayDeque<>();
         typingRunActive = false;
         splitMode  = false;
@@ -2168,6 +2249,7 @@ public class EditorScreen implements AppScreen {
         tmp = scrollRow;  scrollRow  = scrollRow2;  scrollRow2  = tmp;
         boolean tmpB = insertMode; insertMode = insertMode2; insertMode2 = tmpB;
         String tmpS = activeFileName; activeFileName = fileName2; fileName2 = tmpS;
+        String tmpLE = lineEnding; lineEnding = lineEnding2; lineEnding2 = tmpLE;
         tmp = markerBeginRow; markerBeginRow = markerBeginRow2; markerBeginRow2 = tmp;
         tmp = markerBeginCol; markerBeginCol = markerBeginCol2; markerBeginCol2 = tmp;
         tmp = markerEndRow;   markerEndRow   = markerEndRow2;   markerEndRow2   = tmp;
@@ -2188,7 +2270,7 @@ public class EditorScreen implements AppScreen {
         tg.setBackgroundColor(TextColor.ANSI.BLACK);
         for (int r = 0; r < 12; r++) {
             int docRow = r + scrollRow;
-            String text = (docRow < lines.size()) ? lines.get(docRow).toString() : "";
+            String text = expandTabsForDisplay((docRow < lines.size()) ? lines.get(docRow).toString() : "");
             String padded = String.format("%-" + cols + "s",
                     text.length() > cols ? text.substring(0, cols) : text);
             tg.putString(0, r, padded);
@@ -2241,9 +2323,11 @@ public class EditorScreen implements AppScreen {
 
         // Load file into lines2
         lines2.clear();
+        lineEnding2 = System.lineSeparator();
         if (!fileName2.isEmpty()) {
             Path path = Paths.get(fileName2);
             if (Files.exists(path)) {
+                lineEnding2 = detectLineEnding(path);
                 try {
                     for (String line : Files.readAllLines(path))
                         lines2.add(new StringBuilder(line));
@@ -2360,27 +2444,41 @@ public class EditorScreen implements AppScreen {
         }
     }
 
-    // TODO(spec: File I/O — atomic save, binary safety, CRLF preservation, error surfacing):
-    // this method has several gaps against the "Portable contract" for file I/O:
-    //   - Files.write(path, content) writes UTF-8 text and joins lines with
-    //     System.lineSeparator(), so it can't round-trip non-UTF-8/binary content and does
-    //     not remember/preserve the source file's original newline style (the document model
-    //     itself, List<StringBuilder> lines, has already thrown that information away on
-    //     load — this is a load-bearing architectural gap, not just a save-time fix).
-    //   - Not atomic: a crash or full disk mid-write can truncate the target file. Spec wants
-    //     write-to-temp-file-in-same-directory + flush/fsync + atomic rename.
-    //   - The catch block silently swallows IOException; spec requires a clear status-line
-    //     error message (it documents specific short compatibility-style messages for I/O
-    //     failures) rather than losing the failure entirely.
-    private void saveFile() {
+    /**
+     * Save the active buffer to `activeFileName`, preserving its original CRLF/LF line-ending
+     * style (see `lineEnding`/detectLineEnding()) instead of always writing the platform
+     * default. Writes to a temp file in the same directory first, then atomically renames it
+     * over the target, so a crash or failed write can't leave a truncated or half-written file
+     * in place of the original — the previous version stays intact until the rename succeeds.
+     * Falls back to a plain (non-atomic) replace if the filesystem can't do an atomic rename
+     * (e.g. some network mounts) rather than leaving save permanently broken there. Reports
+     * failure to the user instead of silently swallowing it, as the old version did.
+     *
+     * Still line-based UTF-8 text, not a byte-safe/binary model — that's a much larger,
+     * separately-scoped architectural change (same category as F3 L's incremental loading),
+     * not attempted here.
+     */
+    private void saveFile(Screen screen) throws IOException {
         if (activeFileName.isEmpty()) return;
+        Path path = Paths.get(activeFileName).toAbsolutePath();
+        StringBuilder content = new StringBuilder();
+        for (int i = 0; i < lines.size(); i++) {
+            if (i > 0) content.append(lineEnding);
+            content.append(lines.get(i));
+        }
+        byte[] bytes = content.toString().getBytes(StandardCharsets.UTF_8);
+        Path dir = (path.getParent() != null) ? path.getParent() : Paths.get(".");
+        Path tmp = dir.resolve(path.getFileName().toString() + ".neonorton-tmp");
         try {
-            Path path = Paths.get(activeFileName);
-            List<String> content = new ArrayList<>();
-            for (StringBuilder line : lines) content.add(line.toString());
-            Files.write(path, content);
+            Files.write(tmp, bytes);
+            try {
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException notAtomic) {
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
-            // TODO: surface error to user
+            try { Files.deleteIfExists(tmp); } catch (IOException ignored) { /* best effort */ }
+            showMessage(screen, "SAVE FAILED: " + e.getMessage());
         }
     }
 }
