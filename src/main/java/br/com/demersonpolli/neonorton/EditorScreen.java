@@ -52,7 +52,7 @@ import java.util.List;
 /*
  * NE 1.3C compliance status (see "Norton Editor 1.3C: white-box reconstruction
  * specification"). Compliant: cursor family, Backspace/Del/Ctrl-W/Alt-W/Ctrl-L/
- * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
+ * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T/C, insert-vs-replace EOL
  * behavior, F2 status screen (see StatusScreen.StatusInfo), CLI parsing in Main
  * (+LINE, input/output paths, /DA /DB /DC — parsed and applied; --safe/--encoding are parsed
  * but effectively no-ops now, see Main.CommandLineArgs's comments on why), search & replace
@@ -74,6 +74,11 @@ import java.util.List;
  *     has no live-update API, so it only takes effect on the NEXT launch
  *     (Main reads it back before constructing SwingTerminalFrame), not
  *     immediately — F5 C's prompt tells the user this.
+ * F6 C "condensed display" is implemented too, on the same "stored, persisted via F5 S,
+ * applied at next launch" pattern as F5 C above — Lanterna's SwingTerminalFontConfiguration is
+ * likewise only settable at construction time. A 10pt font (vs. the normal 14pt default) is
+ * the closest honest equivalent to the original's higher-column-count video mode on a
+ * fixed-font terminal emulator.
  * F7 Printer is also implemented, deliberately deviating from the spec's literal printer
  * feature at the user's request: P (print-all) and B (print-block) each write one paginated
  * PDF (see PdfWriter — dependency-free, Courier/Base-14, Latin-1 text only) named
@@ -147,6 +152,13 @@ public class EditorScreen implements AppScreen {
     private boolean insertMode = true;   // true = Insert, false = Replace
     private boolean wordWrap   = false;  // true = WW=On, false = WW=Off
     private boolean indent     = false;  // F5 I: auto-indent — Enter copies the current line's leading whitespace
+
+    // F6 C: condensed display. Like F5 C's cursor style, this can't apply live — Lanterna's
+    // SwingTerminalFontConfiguration is only settable when the SwingTerminalFrame is
+    // constructed — so it's stored/persisted (F5 S/EditorConfig) and applied by Main as a
+    // smaller font size on the NEXT launch, the closest honest equivalent to the original's
+    // higher-column-count video mode given a fixed-font terminal emulator.
+    private boolean condensed = false;
 
     // Format/print/tab configuration — the F5/F7 command targets, all interactively settable
     // now (F5 L/T, F7 S/M) and shown on the F2 status screen.
@@ -329,6 +341,7 @@ public class EditorScreen implements AppScreen {
         printMarginLeft = cfg.printMarginLeft;
         printPageLines = cfg.printPageLines;
         insToggles = cfg.insToggles;
+        condensed = cfg.condensed;
     }
 
     @Override
@@ -372,8 +385,8 @@ public class EditorScreen implements AppScreen {
             // Miscellaneous overlay bar (shown while F6 mode is active)
             miscOpBar = new StatusBar(
                 rows - 1,
-                new int[]    { 0,          10,                  30,              46,             61,               79  },
-                new String[] { "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "C" }
+                new int[]    { 0,          10,                  30,              46,             61,               75    },
+                new String[] { "F6 MISC:", "Go-to-line-number", "Match-bracket", "Text-compare", "INS-overstrike", "Cond" }
             );
 
             // Print overlay bar (shown while F7 mode is active)
@@ -1571,20 +1584,11 @@ public class EditorScreen implements AppScreen {
             case 'g' -> goToLineNumber(screen);
             case 'm' -> matchBracket();
             case 't' -> textCompare();
-            // NOTE: this 'i' case is dead — KeyType.Insert is already intercepted above
-            // (`if (key.getKeyType() == KeyType.Insert)`) and returns before reaching this
-            // switch, which correctly implements the spec's "F6+Ins forces replace/overstrike".
-            // Typing the literal character 'i' after F6 falls into this no-op instead; remove
-            // this case (or repurpose the letter) once compliance work touches this method.
-            case 'i' -> { /* TODO: INS-overstrike */ }
-            // TODO: Condensed display. Add a `condensed` boolean field; toggle it here. Wire
-            // it into drawTextPane()/redraw() to render at a denser column width (e.g. treat
-            // the pane as if `cols` were larger — skip characters or use half-width rendering
-            // if the terminal backend ever supports it) — exact column count/behavior isn't
-            // recoverable from the spec's listing, so pick a concrete number (e.g. 132 cols
-            // worth of text scaled into the real terminal width) and document it as a design
-            // choice. Reflect the state in the status bar the same way WW=On/Off is shown.
-            case 'c' -> { /* TODO: C */ }
+            case 'c' -> {
+                condensed = !condensed;
+                showMessage(screen, "CONDENSED DISPLAY " + (condensed ? "ON" : "OFF")
+                        + " - SAVE (F5 S) AND RESTART TO APPLY");
+            }
             default  -> { /* cancel */ }
         }
     }
@@ -1634,6 +1638,7 @@ public class EditorScreen implements AppScreen {
                 cfg.printMarginLeft = printMarginLeft;
                 cfg.printPageLines = printPageLines;
                 cfg.insToggles = insToggles;
+                cfg.condensed = condensed;
                 boolean ok = EditorConfig.save(cfg);
                 showMessage(screen, ok ? "CONFIGURATION SAVED" : "FAILED TO SAVE CONFIGURATION");
             }

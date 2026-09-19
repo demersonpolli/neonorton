@@ -150,10 +150,19 @@ public class Main {
                 cursorStyle = TerminalEmulatorDeviceConfiguration.CursorStyle.REVERSED;
             }
 
+            // F6 C "condensed display": like cursorStyle above, Lanterna's font configuration is
+            // only settable at construction time, so this also only takes effect on the NEXT
+            // launch after being saved via F5 S. 10pt vs. the normal 14pt default fits
+            // noticeably more columns/rows in the same window — the closest honest equivalent
+            // to the original's higher-column-count video mode on a fixed-font terminal emulator.
+            SwingTerminalFontConfiguration fontConfig = savedConfig.condensed
+                    ? SwingTerminalFontConfiguration.getDefaultOfSize(10)
+                    : SwingTerminalFontConfiguration.getDefault();
+
             SwingTerminalFrame terminal = new SwingTerminalFrame(
                     "NeoNorton",
                     TerminalEmulatorDeviceConfiguration.getDefault().withCursorStyle(cursorStyle),
-                    SwingTerminalFontConfiguration.getDefault(),
+                    fontConfig,
                     TerminalEmulatorColorConfiguration.getDefault(),
                     TerminalEmulatorAutoCloseTrigger.CloseOnExitPrivateMode);
             terminal.setVisible(true);

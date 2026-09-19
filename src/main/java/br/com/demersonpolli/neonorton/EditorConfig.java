@@ -11,10 +11,10 @@ import java.util.Properties;
 /**
  * F5 S "Save editor configuration": a small on-disk preferences file for settings that would
  * otherwise reset every launch (tab width/mode, format width, word-wrap, indent, display
- * theme, cursor style, print margin/page length, Ins-key behavior). The spec doesn't recover a
- * historical filename or format for this, so the location and the Properties format here are a
- * portable design choice. A missing or corrupt file falls back to built-in defaults silently
- * rather than blocking startup.
+ * theme, cursor style, print margin/page length, Ins-key behavior, condensed display). The
+ * spec doesn't recover a historical filename or format for this, so the location and the
+ * Properties format here are a portable design choice. A missing or corrupt file falls back to
+ * built-in defaults silently rather than blocking startup.
  */
 public class EditorConfig {
     public int tabWidth = 8;
@@ -27,6 +27,7 @@ public class EditorConfig {
     public int printMarginLeft = 0;
     public int printPageLines = 0;
     public boolean insToggles = false;
+    public boolean condensed = false;
 
     private static Path configPath() {
         return Paths.get(System.getProperty("user.home"), ".neonorton", "config.properties");
@@ -49,6 +50,7 @@ public class EditorConfig {
             cfg.printMarginLeft = parseInt(p.getProperty("printMarginLeft"), cfg.printMarginLeft);
             cfg.printPageLines = parseInt(p.getProperty("printPageLines"), cfg.printPageLines);
             cfg.insToggles = Boolean.parseBoolean(p.getProperty("insToggles", String.valueOf(cfg.insToggles)));
+            cfg.condensed = Boolean.parseBoolean(p.getProperty("condensed", String.valueOf(cfg.condensed)));
         } catch (IOException | RuntimeException e) {
             return new EditorConfig(); // corrupt or unreadable: safe defaults
         }
@@ -67,6 +69,7 @@ public class EditorConfig {
         p.setProperty("printMarginLeft", String.valueOf(cfg.printMarginLeft));
         p.setProperty("printPageLines", String.valueOf(cfg.printPageLines));
         p.setProperty("insToggles", String.valueOf(cfg.insToggles));
+        p.setProperty("condensed", String.valueOf(cfg.condensed));
         try {
             Path path = configPath();
             Files.createDirectories(path.getParent());
