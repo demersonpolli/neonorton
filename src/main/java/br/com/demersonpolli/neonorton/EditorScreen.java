@@ -32,6 +32,7 @@ import com.googlecode.lanterna.gui2.MultiWindowTextGUI;
 import com.googlecode.lanterna.input.KeyStroke;
 import com.googlecode.lanterna.input.KeyType;
 import com.googlecode.lanterna.screen.Screen;
+import com.googlecode.lanterna.terminal.swing.TerminalEmulatorDeviceConfiguration;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -45,22 +46,32 @@ import java.util.List;
  * specification"). Compliant: cursor family, Backspace/Del/Ctrl-W/Alt-W/Ctrl-L/
  * Alt-L/Alt-K, F3 E/S/Q/N/X, all F4 block ops, F6 G/M/T, insert-vs-replace EOL
  * behavior, F2 status screen (see StatusScreen.StatusInfo), CLI parsing in Main
- * (+LINE, input/output paths, /DA /DB /DC — parsed, though display mode/safe
- * mode/encoding aren't applied to behavior yet, see Main's TODOs), search &
- * replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive, Ctrl-Return for a
- * literal newline in the search string, Y / N / star (replace all) / Space
- * replace flow — see the "search & replace" section below; literal
- * byte-for-byte matching only, no regex, as specified), F5 F/L/W/T/I (format
- * paragraph, line length, word-wrap-on-typing, the 3 tab modes + Tab key,
- * auto-indent on Enter — see handleFormatOperation() and handleKey()'s Tab
- * and Enter cases).
+ * (+LINE, input/output paths, /DA /DB /DC — parsed and applied; safe mode/
+ * encoding are still unapplied, see Main's TODOs), search & replace
+ * (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive, Ctrl-Return for a literal
+ * newline in the search string, Y / N / star (replace all) / Space replace
+ * flow — see the "search & replace" section below; literal byte-for-byte
+ * matching only, no regex, as specified), and all of F5 Format ops:
+ *   - F/L/W/T/I: format paragraph, line length, word-wrap-on-typing, the 3
+ *     tab modes + Tab key, auto-indent on Enter (handleFormatOperation() and
+ *     handleKey()'s Tab/Enter cases).
+ *   - D: document-text display theme (/DA white, /DB green, /DC amber) —
+ *     applied live via `displayMode.foreground` in redraw()/drawTextPane().
+ *   - S: persists tab/format/display/cursor/print/Ins-key settings to
+ *     EditorConfig's on-disk properties file; Main loads it back at startup.
+ *   - K: Ins-key behavior (always-insert vs toggle insert/replace); F5 T
+ *     already covers "which tab mode Tab uses", so K's scope is just this.
+ *   - C: cursor style/shape — the choice is stored and persisted via F5 S,
+ *     but Lanterna's TerminalEmulatorDeviceConfiguration is immutable and
+ *     has no live-update API, so it only takes effect on the NEXT launch
+ *     (Main reads it back before constructing SwingTerminalFrame), not
+ *     immediately — F5 C's prompt tells the user this.
  * Not yet compliant, see TODOs at each site below:
- *   - F5 C/D/S/K (cursor style, display theme, save config, TAB/INS key
- *     config) and F7 Printer: overlay bars exist but every command is a stub
- *     (their target fields — printMarginLeft/printPageLines/outputPath —
- *     already exist and feed the F2 status screen; only the interactive
- *     prompts to change them, plus the config-file persistence for F5 S,
- *     are missing).
+ *   - F7 Printer: overlay bar exists but every command is a stub (its target
+ *     fields — printMarginLeft/printPageLines/outputPath — already exist,
+ *     feed the F2 status screen, and round-trip through F5 S/EditorConfig;
+ *     only the interactive prompts to change them, and the PrinterSink
+ *     itself, are missing).
  *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
  *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
@@ -105,6 +116,28 @@ public class EditorScreen implements AppScreen {
     /** F5 T's 3 tab modes (spec: "Editing semantics" / tab configuration dialog). */
     private enum TabMode { LITERAL, SPACES, MOVE }
     private TabMode tabMode = TabMode.SPACES; // default avoids the LITERAL mode's rendering caveat, see handleKey's Tab case
+
+    /** F5 D's 3 display themes (CLI's /DA /DB /DC). Palette values aren't recoverable from the
+     *  spec's listing, so these are a design choice; only the document-text foreground changes
+     *  — background stays black and the status bar / block highlight colors are unaffected. */
+    private enum DisplayMode {
+        DA(TextColor.ANSI.WHITE), DB(TextColor.ANSI.GREEN), DC(TextColor.ANSI.YELLOW);
+        final TextColor.ANSI foreground;
+        DisplayMode(TextColor.ANSI foreground) { this.foreground = foreground; }
+    }
+    private DisplayMode displayMode = DisplayMode.DA; // F5 D; overridable at startup via setDisplayMode()
+
+    // F5 C: cursor shape/style. Lanterna's TerminalEmulatorDeviceConfiguration is immutable and
+    // only settable when the SwingTerminalFrame is constructed (no live-update API exists), so
+    // this field can't be applied while running — it only takes effect on the NEXT launch, after
+    // F5 S saves it and Main reads it back to build the frame. F5 C's prompt says so.
+    private TerminalEmulatorDeviceConfiguration.CursorStyle cursorStyle =
+            TerminalEmulatorDeviceConfiguration.CursorStyle.REVERSED;
+
+    // F5 K: Ins-key behavior. false (default) = Ins always forces insert mode, matching the
+    // current/original behavior; true = Ins toggles insert/replace instead. F5 T already covers
+    // "which tab mode Tab uses" from the spec's F5 K description, so K's scope here is just this.
+    private boolean insToggles = false;
 
     // F3 W "write through cursor" target; null means "same as activeFileName" (the CLI's
     // default when only an input path is given). Set via setOutputPath() from Main.
@@ -193,6 +226,35 @@ public class EditorScreen implements AppScreen {
     /** Set the CLI's --output path (F3 W's target). Null/empty means "same as input file". */
     public void setOutputPath(String path) {
         this.outputPath = (path == null || path.isEmpty()) ? null : path;
+    }
+
+    /** Set the CLI's /DA, /DB, /DC display mode (case-insensitive "da"/"db"/"dc"); invalid or
+     *  null values are ignored, leaving whatever applyConfig()/the default already set. */
+    public void setDisplayMode(String mode) {
+        if (mode == null) return;
+        switch (mode.toLowerCase()) {
+            case "da" -> displayMode = DisplayMode.DA;
+            case "db" -> displayMode = DisplayMode.DB;
+            case "dc" -> displayMode = DisplayMode.DC;
+            default -> { /* ignore invalid */ }
+        }
+    }
+
+    /** Apply a loaded EditorConfig (F5 S's counterpart) — call once at startup, before any CLI
+     *  flag overrides (e.g. setDisplayMode from /DA /DB /DC), so explicit flags win. Invalid
+     *  enum names in the file are ignored, leaving the built-in default for that field. */
+    public void applyConfig(EditorConfig cfg) {
+        tabWidth = cfg.tabWidth;
+        try { tabMode = TabMode.valueOf(cfg.tabMode); } catch (IllegalArgumentException ignored) {}
+        wrapColumn = cfg.wrapColumn;
+        wordWrap = cfg.wordWrap;
+        indent = cfg.indent;
+        try { displayMode = DisplayMode.valueOf(cfg.displayMode); } catch (IllegalArgumentException ignored) {}
+        try { cursorStyle = TerminalEmulatorDeviceConfiguration.CursorStyle.valueOf(cfg.cursorStyle); }
+        catch (IllegalArgumentException ignored) {}
+        printMarginLeft = cfg.printMarginLeft;
+        printPageLines = cfg.printPageLines;
+        insToggles = cfg.insToggles;
     }
 
     @Override
@@ -402,7 +464,7 @@ public class EditorScreen implements AppScreen {
                     applyWordWrap();
                 }
             }
-            case Insert -> insertMode = true;
+            case Insert -> insertMode = insToggles ? !insertMode : true; // F5 K controls which
             case Enter -> {
                 StringBuilder current = lines.get(cursorRow);
                 String tail = current.substring(cursorCol);
@@ -935,7 +997,7 @@ public class EditorScreen implements AppScreen {
         int cols = size.getColumns();
 
         TextGraphics tg = screen.newTextGraphics();
-        tg.setForegroundColor(TextColor.ANSI.WHITE);
+        tg.setForegroundColor(displayMode.foreground);
         tg.setBackgroundColor(TextColor.ANSI.BLACK);
 
         if (!splitMode) {
@@ -995,7 +1057,7 @@ public class EditorScreen implements AppScreen {
 
             if (!hasFull) {
                 // Plain drawing with optional single-marker highlight
-                tg.setForegroundColor(TextColor.ANSI.WHITE);
+                tg.setForegroundColor(displayMode.foreground);
                 tg.setBackgroundColor(TextColor.ANSI.BLACK);
                 tg.putString(0, screenRow, padded);
                 if (hasBegin && docRow == bRow && bCol < cols) {
@@ -1027,7 +1089,7 @@ public class EditorScreen implements AppScreen {
                     TextColor bg = inBlock
                             ? (isBeginChar || isEndChar ? TextColor.ANSI.YELLOW : TextColor.ANSI.CYAN)
                             : TextColor.ANSI.BLACK;
-                    TextColor fg = inBlock ? TextColor.ANSI.BLACK : TextColor.ANSI.WHITE;
+                    TextColor fg = inBlock ? TextColor.ANSI.BLACK : displayMode.foreground;
                     tg.setForegroundColor(fg);
                     tg.setBackgroundColor(bg);
                     tg.putString(c, screenRow, String.valueOf(padded.charAt(c)));
@@ -1311,33 +1373,34 @@ public class EditorScreen implements AppScreen {
                 TabMode m = promptTabMode(screen);
                 if (m != null) tabMode = m;
             }
-            // TODO: Cursor type/shape. Prompt for block/underline/etc. and forward the choice
-            // to the terminal backend's cursor-style call (Lanterna's TextGraphics/Screen
-            // doesn't expose cursor shape directly — this may require dropping to the
-            // underlying Terminal object). Persist the choice in a new `cursorStyle` field.
-            // Deferred alongside 'D'/'S'/'K' below — see the class-level compliance note.
-            case 'c' -> { /* TODO: C */ }
-            // TODO: Display/color theme. Selects among the CLI's /DA, /DB, /DC palettes (see
-            // Main's parsed-but-unused `displayMode`) — add a `displayMode` field here too (or
-            // thread Main's through a setter, like setOutputPath) so F5 D and the CLI flag are
-            // the same setting, and re-render the WHITE/BLACK TextColor.ANSI literals in
-            // redraw()/drawTextPane()/StatusBar via that field instead of the hardcoded colors
-            // used throughout today.
-            case 'd' -> { /* TODO: D */ }
+            case 'c' -> {
+                TerminalEmulatorDeviceConfiguration.CursorStyle s = promptCursorStyle(screen);
+                if (s != null) {
+                    cursorStyle = s;
+                    showMessage(screen, "CURSOR STYLE SET - TAKES EFFECT AFTER F5 S AND RESTART");
+                }
+            }
+            case 'd' -> {
+                DisplayMode m = promptDisplayMode(screen);
+                if (m != null) displayMode = m;
+            }
             case 'i' -> indent = !indent;
-            // TODO: Save editor configuration. Persist tabWidth/tabMode, insert-key behavior,
-            // cursorStyle, displayMode, wrapColumn/wordWrap, indent, and print settings
-            // (printMarginLeft/printPageLines — all these fields already exist on EditorScreen)
-            // to a config file under the platform's standard user-config directory (spec leaves
-            // the format/filename undecided — pick one, e.g. config.toml, and load it back on
-            // startup in Main/EditorScreen's constructor with safe defaults on a missing/corrupt
-            // file).
-            case 's' -> { /* TODO: S */ }
-            // TODO: TAB/INS key configuration. A small dialog choosing (a) which of the 3 tab
-            // modes from 'T' above Tab uses by default, and (b) whether Ins toggles
-            // insert/replace (current behavior, `case Insert -> insertMode = true` plus F6+Ins)
-            // or always forces insert mode. Store as fields read by handleKey's Insert case.
-            case 'k' -> { /* TODO: K */ }
+            case 's' -> {
+                EditorConfig cfg = new EditorConfig();
+                cfg.tabWidth = tabWidth;
+                cfg.tabMode = tabMode.name();
+                cfg.wrapColumn = wrapColumn;
+                cfg.wordWrap = wordWrap;
+                cfg.indent = indent;
+                cfg.displayMode = displayMode.name();
+                cfg.cursorStyle = cursorStyle.name();
+                cfg.printMarginLeft = printMarginLeft;
+                cfg.printPageLines = printPageLines;
+                cfg.insToggles = insToggles;
+                boolean ok = EditorConfig.save(cfg);
+                showMessage(screen, ok ? "CONFIGURATION SAVED" : "FAILED TO SAVE CONFIGURATION");
+            }
+            case 'k' -> insToggles = !insToggles;
             default  -> { /* cancel */ }
         }
     }
@@ -1451,6 +1514,56 @@ public class EditorScreen implements AppScreen {
                 case 'l': return TabMode.LITERAL;
                 case 's': return TabMode.SPACES;
                 case 'm': return TabMode.MOVE;
+                default:  // ignore other keys, keep waiting
+            }
+        }
+    }
+
+    /** F5 D's mode sub-prompt: A/B/C select the CLI's /DA, /DB, /DC display themes. */
+    private DisplayMode promptDisplayMode(Screen screen) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int row  = (splitMode && activePane == 1) ? 13 : 0;
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, row, String.format("%-" + cols + "s",
+                "Display:  A=/DA white  B=/DB green  C=/DC amber"));
+        screen.setCursorPosition(null);
+        screen.refresh();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return null;
+            if (k.getKeyType() != KeyType.Character) continue;
+            switch (Character.toLowerCase(k.getCharacter())) {
+                case 'a': return DisplayMode.DA;
+                case 'b': return DisplayMode.DB;
+                case 'c': return DisplayMode.DC;
+                default:  // ignore other keys, keep waiting
+            }
+        }
+    }
+
+    /** F5 C's mode sub-prompt: R/F/U/V select one of Lanterna's 4 cursor styles. Note (shown to
+     *  the user by the caller): this can't be applied live — see the `cursorStyle` field. */
+    private TerminalEmulatorDeviceConfiguration.CursorStyle promptCursorStyle(Screen screen) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int row  = (splitMode && activePane == 1) ? 13 : 0;
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, row, String.format("%-" + cols + "s",
+                "Cursor style:  R=reversed  F=fixed background  U=under bar  V=vertical bar"));
+        screen.setCursorPosition(null);
+        screen.refresh();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return null;
+            if (k.getKeyType() != KeyType.Character) continue;
+            switch (Character.toLowerCase(k.getCharacter())) {
+                case 'r': return TerminalEmulatorDeviceConfiguration.CursorStyle.REVERSED;
+                case 'f': return TerminalEmulatorDeviceConfiguration.CursorStyle.FIXED_BACKGROUND;
+                case 'u': return TerminalEmulatorDeviceConfiguration.CursorStyle.UNDER_BAR;
+                case 'v': return TerminalEmulatorDeviceConfiguration.CursorStyle.VERTICAL_BAR;
                 default:  // ignore other keys, keep waiting
             }
         }
@@ -1868,7 +1981,7 @@ public class EditorScreen implements AppScreen {
         TextGraphics tg = screen.newTextGraphics();
 
         // Redraw pane 1 content in rows 0-11
-        tg.setForegroundColor(TextColor.ANSI.WHITE);
+        tg.setForegroundColor(displayMode.foreground);
         tg.setBackgroundColor(TextColor.ANSI.BLACK);
         for (int r = 0; r < 12; r++) {
             int docRow = r + scrollRow;

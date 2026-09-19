@@ -28,8 +28,11 @@ import com.googlecode.lanterna.TextColor;
 import com.googlecode.lanterna.gui2.*;
 import com.googlecode.lanterna.screen.Screen;
 import com.googlecode.lanterna.screen.TerminalScreen;
+import com.googlecode.lanterna.terminal.swing.SwingTerminalFontConfiguration;
 import com.googlecode.lanterna.terminal.swing.SwingTerminalFrame;
 import com.googlecode.lanterna.terminal.swing.TerminalEmulatorAutoCloseTrigger;
+import com.googlecode.lanterna.terminal.swing.TerminalEmulatorColorConfiguration;
+import com.googlecode.lanterna.terminal.swing.TerminalEmulatorDeviceConfiguration;
 
 import java.io.IOException;
 
@@ -45,11 +48,8 @@ public class Main {
         // outputPath now reaches EditorScreen via setOutputPath() below (its target, F3 W
         // "write through cursor", is still a stub — see EditorScreen's TODO on that case).
         String outputPath = null;
-        // TODO: displayMode is parsed but never applied. Thread it into EditorScreen
-        // (constructor param or setter) and use it wherever TextColor.ANSI.WHITE/BLACK
-        // are hardcoded today (redraw(), drawTextPane(), StatusBar) to pick one of three
-        // palettes for /DA, /DB, /DC — see the matching F5 'D' TODO in EditorScreen for
-        // where the same setting should be exposed interactively.
+        // displayMode now reaches EditorScreen via setDisplayMode() below, applied after
+        // EditorConfig's saved value so an explicit CLI flag always wins over a saved default.
         String displayMode = null; // "da", "db", "dc"
         // TODO: safeMode is parsed but never applied. This should gate the "Portable-safe"
         // behaviors from the spec's compatibility-level contract: atomic save-via-temp-file
@@ -138,8 +138,22 @@ public class Main {
     
     public static void main(String[] args) {
         try {
+            // F5 S/C's saved config: cursor style must be known BEFORE the SwingTerminalFrame is
+            // constructed, since Lanterna's TerminalEmulatorDeviceConfiguration is immutable and
+            // has no live-update API (see EditorScreen's `cursorStyle` field comment).
+            EditorConfig savedConfig = EditorConfig.load();
+            TerminalEmulatorDeviceConfiguration.CursorStyle cursorStyle;
+            try {
+                cursorStyle = TerminalEmulatorDeviceConfiguration.CursorStyle.valueOf(savedConfig.cursorStyle);
+            } catch (IllegalArgumentException e) {
+                cursorStyle = TerminalEmulatorDeviceConfiguration.CursorStyle.REVERSED;
+            }
+
             SwingTerminalFrame terminal = new SwingTerminalFrame(
                     "NeoNorton",
+                    TerminalEmulatorDeviceConfiguration.getDefault().withCursorStyle(cursorStyle),
+                    SwingTerminalFontConfiguration.getDefault(),
+                    TerminalEmulatorColorConfiguration.getDefault(),
                     TerminalEmulatorAutoCloseTrigger.CloseOnExitPrivateMode);
             terminal.setVisible(true);
 
@@ -155,7 +169,7 @@ public class Main {
                     new EmptySpace(TextColor.ANSI.BLUE));
 
             String fileName = cliArgs.inputPath;
-            
+
             // If no input file specified via CLI, show splash screen to get filename
             if (fileName == null || fileName.isEmpty()) {
                 SplashScreen splash = new SplashScreen();
@@ -165,10 +179,14 @@ public class Main {
 
             // Create editor screen with parsed arguments
             EditorScreen editor = new EditorScreen(fileName);
+            editor.applyConfig(savedConfig);
             if (cliArgs.startLine > 0) {
                 editor.setStartLine(cliArgs.startLine);
             }
             editor.setOutputPath(cliArgs.outputPath);
+            if (cliArgs.displayMode != null) {
+                editor.setDisplayMode(cliArgs.displayMode); // explicit CLI flag overrides saved config
+            }
             editor.show(gui);
 
             screen.stopScreen();
