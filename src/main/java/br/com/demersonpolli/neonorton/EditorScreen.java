@@ -50,24 +50,29 @@ import java.util.List;
  * replace (Alt-F/Ctrl-F/Alt-C/Ctrl-C, ESC case-insensitive, Ctrl-Return for a
  * literal newline in the search string, Y / N / star (replace all) / Space
  * replace flow — see the "search & replace" section below; literal
- * byte-for-byte matching only, no regex, as specified).
+ * byte-for-byte matching only, no regex, as specified), F5 F/L/W/T/I (format
+ * paragraph, line length, word-wrap-on-typing, the 3 tab modes + Tab key,
+ * auto-indent on Enter — see handleFormatOperation() and handleKey()'s Tab
+ * and Enter cases).
  * Not yet compliant, see TODOs at each site below:
- *   - F5 Format, F7 Printer: overlay bars exist but every command is a stub
- *     (their target fields — wrapColumn/tabWidth/indent/printMarginLeft/
- *     printPageLines/outputPath — already exist and feed the F2 status screen;
- *     only the interactive prompts to change them are missing).
+ *   - F5 C/D/S/K (cursor style, display theme, save config, TAB/INS key
+ *     config) and F7 Printer: overlay bars exist but every command is a stub
+ *     (their target fields — printMarginLeft/printPageLines/outputPath —
+ *     already exist and feed the F2 status screen; only the interactive
+ *     prompts to change them, plus the config-file persistence for F5 S,
+ *     are missing).
  *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
  *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
- *   - Tab key inserts nothing in single-pane mode (only repurposed for pane
- *     switch in split mode) — none of the spec's 3 tab modes exist.
+ *   - Tab's LITERAL mode inserts a real '\t' byte but the renderer
+ *     (drawTextPane) does no column-width expansion for it, so a literal tab
+ *     will visually misalign — a pre-existing renderer limitation, not fixed
+ *     here; SPACES/MOVE modes (the default) have no such issue.
  *   - Undo is single-level and only snapshotted around delete-class ops, not
  *     an unbounded stack covering every insert/delete/replace transaction.
  *   - File I/O is line-based UTF-8 text (Files.readAllLines/write): no CRLF
  *     preservation, no binary/byte-safe mode, no atomic save, no incremental
  *     load for large files.
- *   - wordWrap field is read by the status bar/F2 screen but nothing ever sets
- *     it true or wraps text on insertion (F5 W is a stub).
  */
 public class EditorScreen implements AppScreen {
 
@@ -87,15 +92,19 @@ public class EditorScreen implements AppScreen {
     // Editor modes
     private boolean insertMode = true;   // true = Insert, false = Replace
     private boolean wordWrap   = false;  // true = WW=On, false = WW=Off
-    private boolean indent     = false;  // F5 I: auto-indent (not yet wired to Enter)
+    private boolean indent     = false;  // F5 I: auto-indent — Enter copies the current line's leading whitespace
 
     // Format/print/tab configuration — these are the F5/F7 command targets. The fields exist
-    // now (for the F2 status screen) with sensible defaults; F5/F7 still need to let the user
-    // change them interactively, see the TODOs on their handler methods below.
+    // now (for the F2 status screen) with sensible defaults; F7 still needs to let the user
+    // change its fields interactively, see the TODOs on its handler method below.
     private int wrapColumn      = 0;   // F5 L: format/word-wrap line length; 0 = off/unset
     private int tabWidth        = 8;   // F5 T: tab display width
     private int printMarginLeft = 0;   // F7 M: left margin for printing
     private int printPageLines  = 0;   // F7 S: lines per printed page; 0 = no pagination
+
+    /** F5 T's 3 tab modes (spec: "Editing semantics" / tab configuration dialog). */
+    private enum TabMode { LITERAL, SPACES, MOVE }
+    private TabMode tabMode = TabMode.SPACES; // default avoids the LITERAL mode's rendering caveat, see handleKey's Tab case
 
     // F3 W "write through cursor" target; null means "same as activeFileName" (the CLI's
     // default when only an input path is given). Set via setOutputPath() from Main.
@@ -390,16 +399,39 @@ public class EditorScreen implements AppScreen {
                         line.setCharAt(cursorCol, ch);
                     }
                     cursorCol++;
+                    applyWordWrap();
                 }
             }
             case Insert -> insertMode = true;
             case Enter -> {
                 StringBuilder current = lines.get(cursorRow);
-                StringBuilder newLine = new StringBuilder(current.substring(cursorCol));
+                String tail = current.substring(cursorCol);
                 current.delete(cursorCol, current.length());
-                lines.add(cursorRow + 1, newLine);
+                String leadingWs = "";
+                if (indent) {
+                    String cur = current.toString();
+                    int i = 0;
+                    while (i < cur.length() && (cur.charAt(i) == ' ' || cur.charAt(i) == '\t')) i++;
+                    leadingWs = cur.substring(0, i);
+                }
+                lines.add(cursorRow + 1, new StringBuilder(leadingWs + tail));
                 cursorRow++;
-                cursorCol = 0;
+                cursorCol = leadingWs.length();
+            }
+            case Tab -> {
+                switch (tabMode) {
+                    case LITERAL -> {
+                        lines.get(cursorRow).insert(cursorCol, '\t');
+                        cursorCol++;
+                    }
+                    case SPACES -> {
+                        int n = tabWidth - (cursorCol % tabWidth);
+                        lines.get(cursorRow).insert(cursorCol, " ".repeat(n));
+                        cursorCol += n;
+                    }
+                    case MOVE -> cursorCol = Math.min(
+                            cursorCol + (tabWidth - (cursorCol % tabWidth)), lines.get(cursorRow).length());
+                }
             }
             case Backspace -> {
                 saveUndo();
@@ -508,13 +540,8 @@ public class EditorScreen implements AppScreen {
                 cursorRow = Math.min(lines.size() - 1, cursorRow + textRows);
                 cursorCol = Math.min(cursorCol, lines.get(cursorRow).length());
             }
-            // TODO(spec: Editing semantics — tab modes): KeyType.Tab has no case here, so
-            // pressing Tab in single-pane mode does nothing (in split mode it's consumed
-            // earlier in show() to switch panes and never reaches handleKey at all). The
-            // spec requires 3 configurable tab modes selectable via F5 T: (1) insert a
-            // literal TAB byte, (2) insert spaces to the next tab stop, (3) move the cursor
-            // to the next tab stop without writing text. None exist; add a case here plus
-            // a `tabMode`/`tabWidth` field wired up by handleFormatOperation's 'T' command.
+            // NOTE: in split mode, Tab is still consumed earlier in show() to switch panes and
+            // never reaches this switch at all — only single-pane mode gets the case above.
             default -> {}
         }
 
@@ -526,6 +553,28 @@ public class EditorScreen implements AppScreen {
             scrollRow = cursorRow;
         } else if (cursorRow >= scrollRow + textRows) {
             scrollRow = cursorRow - textRows + 1;
+        }
+    }
+
+    /** F5 W follow-up: after a character is typed, if word-wrap is on and the line now exceeds
+     *  wrapColumn, push the trailing word onto a new line — breaking at the last space at/before
+     *  the column limit. A single word longer than wrapColumn is left to overflow rather than
+     *  broken mid-word. */
+    private void applyWordWrap() {
+        if (!wordWrap || wrapColumn <= 0) return;
+        StringBuilder line = lines.get(cursorRow);
+        if (line.length() <= wrapColumn) return;
+        int sp = -1;
+        for (int c = Math.min(wrapColumn, line.length() - 1); c >= 0; c--) {
+            if (line.charAt(c) == ' ') { sp = c; break; }
+        }
+        if (sp < 0) return;
+        String overflow = line.substring(sp + 1);
+        line.delete(sp, line.length()); // also removes the breaking space
+        lines.add(cursorRow + 1, new StringBuilder(overflow));
+        if (cursorCol > sp) {
+            cursorRow++;
+            cursorCol -= (sp + 1);
         }
     }
 
@@ -1250,35 +1299,23 @@ public class EditorScreen implements AppScreen {
         if (key.getKeyType() != KeyType.Character) return;
 
         switch (Character.toLowerCase(key.getCharacter())) {
-            // TODO: Format-paragraph. Find the paragraph the cursor is in (scan up/down from
-            // cursorRow to the nearest blank line or buffer edge on each side). Join its lines
-            // into one string, collapse runs of whitespace to single spaces, then greedily
-            // rewrap at the existing `wrapColumn` field (settable via 'l' below; 0 = off, so
-            // treat 0 as "don't reflow"), re-emitting the original leading indent on every
-            // produced line. Replace the paragraph's lines in `lines` with the rewrapped ones
-            // in a single saveUndo() transaction. Must not touch a marked block
-            // (hasFullMarkers()) that overlaps — refuse or skip it if so.
-            case 'f' -> { /* TODO: Format-paragraph */ }
-            // TODO: Line-length. Reuse the goToLineNumber() digit-prompt pattern to read an
-            // integer into the existing `wrapColumn` field (shared with Format-paragraph and
-            // the word-wrap-on-typing behavior below; also shown on F2's status screen).
-            // Validate > 0; ignore on cancel/empty input.
-            case 'l' -> { /* TODO: Line-length */ }
-            // TODO: Word-wrap. Flip the existing `wordWrap` field (it's declared and read by
-            // updateStatusBar() already, just never toggled). Once true, handleKey's Character
-            // case must check line length against `wrapColumn` after each insertion and, when
-            // exceeded, push the trailing word down to a new line the way Enter does.
-            case 'w' -> { /* TODO: Word-wrap */ }
-            // TODO: Tab display/insert mode. Prompt (goToLineNumber-style digit read) for tab
-            // width into the existing `tabWidth` field, then offer a 3-way selector (e.g. read
-            // one more char: 'l' = insert literal TAB byte, 's' = insert spaces to next stop,
-            // 'm' = move cursor to next stop without writing) stored in a new `tabMode` enum
-            // field. handleKey's missing `case Tab ->` (see the TODO there) reads both fields.
-            case 't' -> { /* TODO: T */ }
+            case 'f' -> formatParagraph(screen);
+            case 'l' -> {
+                Integer v = promptInt(screen, "Format/word-wrap line length:");
+                if (v != null && v > 0) wrapColumn = v;
+            }
+            case 'w' -> wordWrap = !wordWrap;
+            case 't' -> {
+                Integer w = promptInt(screen, "Tab width:");
+                if (w != null && w > 0) tabWidth = w;
+                TabMode m = promptTabMode(screen);
+                if (m != null) tabMode = m;
+            }
             // TODO: Cursor type/shape. Prompt for block/underline/etc. and forward the choice
             // to the terminal backend's cursor-style call (Lanterna's TextGraphics/Screen
             // doesn't expose cursor shape directly — this may require dropping to the
             // underlying Terminal object). Persist the choice in a new `cursorStyle` field.
+            // Deferred alongside 'D'/'S'/'K' below — see the class-level compliance note.
             case 'c' -> { /* TODO: C */ }
             // TODO: Display/color theme. Selects among the CLI's /DA, /DB, /DC palettes (see
             // Main's parsed-but-unused `displayMode`) — add a `displayMode` field here too (or
@@ -1287,10 +1324,7 @@ public class EditorScreen implements AppScreen {
             // redraw()/drawTextPane()/StatusBar via that field instead of the hardcoded colors
             // used throughout today.
             case 'd' -> { /* TODO: D */ }
-            // TODO: Indentation toggle. Flip the existing `indent` field. When true, Enter (in
-            // handleKey's `case Enter ->`) should copy the leading whitespace of the current
-            // line onto the new line instead of starting at column 0.
-            case 'i' -> { /* TODO: I */ }
+            case 'i' -> indent = !indent;
             // TODO: Save editor configuration. Persist tabWidth/tabMode, insert-key behavior,
             // cursorStyle, displayMode, wrapColumn/wordWrap, indent, and print settings
             // (printMarginLeft/printPageLines — all these fields already exist on EditorScreen)
@@ -1305,6 +1339,120 @@ public class EditorScreen implements AppScreen {
             // or always forces insert mode. Store as fields read by handleKey's Insert case.
             case 'k' -> { /* TODO: K */ }
             default  -> { /* cancel */ }
+        }
+    }
+
+    /** F5 F: reflow the paragraph containing the cursor (a blank-line-delimited run of lines)
+     *  at `wrapColumn`, collapsing internal whitespace to single spaces and re-applying the
+     *  paragraph's own leading indent to every produced line. Refuses if a marked block
+     *  overlaps the paragraph, so F4's selection is never silently reformatted away. */
+    private void formatParagraph(Screen screen) throws IOException {
+        if (wrapColumn <= 0) { showMessage(screen, "SET FORMAT WIDTH FIRST (F5 L)"); return; }
+        if (lines.get(cursorRow).toString().isBlank()) return; // cursor not inside a paragraph
+
+        int start = cursorRow;
+        while (start > 0 && !lines.get(start - 1).toString().isBlank()) start--;
+        int end = cursorRow;
+        while (end < lines.size() - 1 && !lines.get(end + 1).toString().isBlank()) end++;
+
+        if (hasFullMarkers() && !(markerEndRow < start || markerBeginRow > end)) {
+            showMessage(screen, "CAN'T FORMAT: BLOCK MARKED IN THIS PARAGRAPH");
+            return;
+        }
+
+        String first = lines.get(start).toString();
+        int indentLen = 0;
+        while (indentLen < first.length() && first.charAt(indentLen) == ' ') indentLen++;
+        String paraIndent = " ".repeat(indentLen);
+
+        StringBuilder joined = new StringBuilder();
+        for (int r = start; r <= end; r++) {
+            if (joined.length() > 0) joined.append(' ');
+            joined.append(lines.get(r).toString().trim());
+        }
+
+        List<String> wrapped = new ArrayList<>();
+        StringBuilder cur = new StringBuilder(paraIndent);
+        boolean lineHasWord = false;
+        for (String w : joined.toString().split("\\s+")) {
+            if (w.isEmpty()) continue;
+            int extra = lineHasWord ? 1 : 0;
+            if (lineHasWord && cur.length() + extra + w.length() > wrapColumn) {
+                wrapped.add(cur.toString());
+                cur = new StringBuilder(paraIndent);
+                lineHasWord = false;
+            }
+            if (lineHasWord) cur.append(' ');
+            cur.append(w);
+            lineHasWord = true;
+        }
+        wrapped.add(cur.toString());
+
+        saveUndo();
+        for (int r = end; r >= start; r--) lines.remove(r);
+        for (int i = wrapped.size() - 1; i >= 0; i--) lines.add(start, new StringBuilder(wrapped.get(i)));
+        cursorRow = start;
+        cursorCol = Math.min(indentLen, lines.get(start).length());
+        clampCursor();
+    }
+
+    /** Prompt for a non-negative integer using the same 3-row layout as goToLineNumber().
+     *  Returns null on Escape, empty input, or a non-numeric entry. */
+    private Integer promptInt(Screen screen, String label) throws IOException {
+        int cols      = screen.getTerminalSize().getColumns();
+        int promptRow = (splitMode && activePane == 1) ? 13 : 0;
+        int inputRow  = promptRow + 1;
+        int ruleRow   = promptRow + 2;
+
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, promptRow, String.format("%-" + cols + "s", label));
+        tg.putString(0, inputRow,  String.format("%-" + cols + "s", ""));
+        tg.putString(0, ruleRow,   "─".repeat(cols));
+        screen.setCursorPosition(new TerminalPosition(0, inputRow));
+        screen.refresh();
+
+        StringBuilder num = new StringBuilder();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return null;
+            if (k.getKeyType() == KeyType.Enter) break;
+            if (k.getKeyType() == KeyType.Backspace) {
+                if (num.length() > 0) num.deleteCharAt(num.length() - 1);
+            } else if (k.getKeyType() == KeyType.Character && !k.isCtrlDown() && !k.isAltDown()
+                    && Character.isDigit(k.getCharacter())) {
+                num.append(k.getCharacter());
+            }
+            tg.putString(0, inputRow, String.format("%-" + cols + "s", num.toString()));
+            screen.setCursorPosition(new TerminalPosition(num.length(), inputRow));
+            screen.refresh();
+        }
+        if (num.length() == 0) return null;
+        try { return Integer.parseInt(num.toString()); } catch (NumberFormatException e) { return null; }
+    }
+
+    /** F5 T's mode sub-prompt: L = literal TAB byte, S = insert spaces, M = move only. */
+    private TabMode promptTabMode(Screen screen) throws IOException {
+        int cols = screen.getTerminalSize().getColumns();
+        int row  = (splitMode && activePane == 1) ? 13 : 0;
+        TextGraphics tg = screen.newTextGraphics();
+        tg.setForegroundColor(TextColor.ANSI.WHITE_BRIGHT);
+        tg.setBackgroundColor(TextColor.ANSI.BLACK);
+        tg.putString(0, row, String.format("%-" + cols + "s",
+                "Tab mode:  L=literal TAB byte  S=insert spaces  M=move only"));
+        screen.setCursorPosition(null);
+        screen.refresh();
+        while (true) {
+            KeyStroke k = screen.readInput();
+            if (k.getKeyType() == KeyType.Escape) return null;
+            if (k.getKeyType() != KeyType.Character) continue;
+            switch (Character.toLowerCase(k.getCharacter())) {
+                case 'l': return TabMode.LITERAL;
+                case 's': return TabMode.SPACES;
+                case 'm': return TabMode.MOVE;
+                default:  // ignore other keys, keep waiting
+            }
         }
     }
 
