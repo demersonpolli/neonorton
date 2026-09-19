@@ -38,6 +38,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -66,12 +68,14 @@ import java.util.List;
  *     has no live-update API, so it only takes effect on the NEXT launch
  *     (Main reads it back before constructing SwingTerminalFrame), not
  *     immediately — F5 C's prompt tells the user this.
+ * F7 Printer is also implemented, deliberately deviating from the spec's literal printer
+ * feature at the user's request: P (print-all) and B (print-block) each write one paginated
+ * PDF (see PdfWriter — dependency-free, Courier/Base-14, Latin-1 text only) named
+ * "<file>-print-<yyyy-MM-dd-hh-mm-ss>.pdf" next to the edited file, honoring printMarginLeft
+ * (S sets printPageLines, M sets printMarginLeft). E (eject-page) is a documented no-op — a
+ * mid-stream form-feed has no meaning when P/B each produce one complete PDF per invocation
+ * rather than streaming to an open print job.
  * Not yet compliant, see TODOs at each site below:
- *   - F7 Printer: overlay bar exists but every command is a stub (its target
- *     fields — printMarginLeft/printPageLines/outputPath — already exist,
- *     feed the F2 status screen, and round-trip through F5 S/EditorConfig;
- *     only the interactive prompts to change them, and the PrinterSink
- *     itself, are missing).
  *   - F3 W (write-through-cursor), A (append), L (load more), C (close output).
  *   - F9 DOS/shell command processor is not implemented.
  *   - Ctrl-P (insert control/extended byte) is not implemented.
@@ -1146,36 +1150,72 @@ public class EditorScreen implements AppScreen {
         KeyStroke key = screen.readInput();
         if (key.getKeyType() != KeyType.Character) return;
 
-        // Printer output must go through a PrinterSink abstraction (named file / OS print
-        // command / stdout) — never a parallel port — so P/B below share one sink instance
-        // configured by the S/M commands.
+        // "Printer" output is redirected to a PDF file next to the edited document (see
+        // PdfWriter) rather than an OS print command or a parallel port — a deliberate
+        // deviation from the spec's literal printer feature, at the user's request.
         switch (Character.toLowerCase(key.getCharacter())) {
-            // TODO: Print-all. `printMarginLeft`/`printPageLines` fields already exist (set by
-            // 'm'/'s' below, and shown on F2's status screen) — open/obtain the PrinterSink,
-            // then stream every line in `lines` through it: pad each line with
-            // `printMarginLeft` spaces, expand tabs if the F5 tab-expansion-on-print option is
-            // set, and insert a form feed every `printPageLines` output lines (skip pagination
-            // entirely when it's 0). Let Ctrl-C during the loop abort and close the sink early.
-            case 'p' -> { /* TODO: Print-all */ }
-            // TODO: Block-print. Call hasFullMarkers() first and show "TWO BLOCK MARKERS
-            // NEEDED" (see StatusBar/overlay pattern used elsewhere) if unset; otherwise reuse
-            // extractBlockContent() to get the marked lines and feed exactly that list through
-            // the same PrinterSink pipeline as Print-all (margin/page-length/tab rules apply
-            // identically).
-            case 'b' -> { /* TODO: Block-print */ }
-            // TODO: Eject-page. Send a raw form-feed byte (0x0C) to the currently open
-            // PrinterSink; if no sink/print job is open, this is a no-op (nothing to eject).
-            case 'e' -> { /* TODO: Eject-page */ }
-            // TODO: Set-lines-per-page. Reuse the goToLineNumber() digit-prompt pattern to read
-            // an integer into the existing `printPageLines` field; 0 means "no pagination" per
-            // spec (already the default). Validate non-negative; ignore/cancel on empty or
-            // non-numeric input.
-            case 's' -> { /* TODO: Set-lines-per-page */ }
-            // TODO: Margin. Same digit-prompt pattern as 's' above, writing the existing
-            // `printMarginLeft` field; this many spaces get prepended to every printed line.
-            case 'm' -> { /* TODO: Margin */ }
+            case 'p' -> {
+                List<String> content = new ArrayList<>();
+                for (StringBuilder line : lines) content.add(line.toString());
+                printToPdf(screen, content);
+            }
+            case 'b' -> {
+                if (!hasFullMarkers()) { showMessage(screen, "TWO BLOCK MARKERS NEEDED"); return; }
+                printToPdf(screen, extractBlockContent());
+            }
+            // Eject-page (a mid-stream form-feed) doesn't apply to this batch-PDF model: P/B
+            // each write one complete, already-paginated PDF per invocation, so there's no open
+            // print job to send a form-feed to. Left as a no-op rather than removed, so the
+            // overlay's key list still matches the spec's F7 command set.
+            case 'e' -> { /* no-op: doesn't apply to batch PDF output */ }
+            case 's' -> {
+                Integer v = promptInt(screen, "Lines per printed page (0 = single page):");
+                if (v != null && v >= 0) printPageLines = v;
+            }
+            case 'm' -> {
+                Integer v = promptInt(screen, "Print left margin (spaces):");
+                if (v != null && v >= 0) printMarginLeft = v;
+            }
             default  -> { /* cancel */ }
         }
+    }
+
+    /** F7 P/B: write `content` (padded by `printMarginLeft`, paginated by `printPageLines`) as
+     *  a PDF named "<file>-print-<yyyy-MM-dd-hh-mm-ss>.pdf" next to the edited file. */
+    private void printToPdf(Screen screen, List<String> content) throws IOException {
+        if (content == null || content.isEmpty()) { showMessage(screen, "NOTHING TO PRINT"); return; }
+        String margin = " ".repeat(Math.max(0, printMarginLeft));
+        List<String> withMargin = new ArrayList<>(content.size());
+        for (String l : content) withMargin.add(margin + l);
+
+        Path out = buildPrintOutputPath();
+        try {
+            PdfWriter.write(out, withMargin, printPageLines);
+            showMessage(screen, "PRINTED TO " + out.getFileName());
+        } catch (IOException e) {
+            showMessage(screen, "PRINT FAILED: " + e.getMessage());
+        }
+    }
+
+    /** Builds <folder-of-active-file>/<filename-without-extension>-print-<timestamp>.pdf, per
+     *  the requested "yyyy-MM-dd-hh-mm-ss" format (note: lowercase hh is a 12-hour clock hour
+     *  with no AM/PM marker, exactly as specified). An unsaved buffer falls back to "untitled"
+     *  in the current working directory. */
+    private Path buildPrintOutputPath() {
+        Path dir;
+        String baseName;
+        if (activeFileName == null || activeFileName.isEmpty()) {
+            dir = Paths.get(".");
+            baseName = "untitled";
+        } else {
+            Path p = Paths.get(activeFileName).toAbsolutePath();
+            dir = (p.getParent() != null) ? p.getParent() : Paths.get(".");
+            String fn = p.getFileName().toString();
+            int dot = fn.lastIndexOf('.');
+            baseName = (dot > 0) ? fn.substring(0, dot) : fn;
+        }
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd-hh-mm-ss"));
+        return dir.resolve(baseName + "-print-" + timestamp + ".pdf");
     }
 
     /** Compare active pane vs other pane starting from their respective cursors.
