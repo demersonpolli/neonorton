@@ -12,9 +12,13 @@ NeoNorton is a retro, keyboard-driven text editor inspired by the classic Norton
 mvn package
 run.bat [filename]
 ```
+```sh
+mvn package
+./run.sh [filename]
+```
 
-- `mvn package` compiles and (via the shade plugin) produces `target\retro-text-editor-1.0-SNAPSHOT-shaded.jar`, an executable fat jar with `br.com.demersonpolli.neonorton.Main` as the entry point.
-- `run.bat` launches that shaded jar with `javaw`, optionally passing a filename to open on startup.
+- `mvn package` compiles and (via the shade plugin) produces `target/retro-text-editor-1.0-SNAPSHOT-shaded.jar`, an executable fat jar with `br.com.demersonpolli.neonorton.Main` as the entry point.
+- `run.bat` (Windows) launches that shaded jar with `javaw`; `run.sh` (macOS/Linux, `chmod +x` already set in git via `.gitattributes`) launches it with `java`. Both forward all arguments to the app and detach rather than blocking the invoking shell/console, and both exit with a clear message instead of running `java`/`javaw` at all if the jar hasn't been built yet.
 - There is no test suite and no linter configured in this repo. `apache-maven/` is gitignored and not actually present in a fresh checkout — if `mvn` isn't on PATH, compile directly with `javac -encoding UTF-8` against a downloaded `lanterna-3.1.1.jar` (Maven Central), matching what the CI-less workflow in this repo's history actually did.
 - Target OS is Windows: the app opens a `SwingTerminalFrame` (a Swing window emulating a terminal), so it will not run headless.
 - **Use a stable LTS JDK (17 or 21) to build and run, not a bleeding-edge/non-LTS build.** A real compatibility bug was found empirically: under at least one non-LTS JDK, Lanterna's CJK-width-detection code (`TerminalTextUtils.isCharCJK` → `Character.UnicodeBlock.of()`) hangs at ~100% CPU on the splash screen instead of ever showing a window. Not a bug in this codebase; a JDK/Lanterna interaction. If `java -version`/`javac -version` on PATH resolve to something unusual, get a JDK 17/21 install instead of debugging further here.

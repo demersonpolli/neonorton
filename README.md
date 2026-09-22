@@ -29,9 +29,13 @@
 mvn package
 run.bat
 ```
+```sh
+mvn package
+./run.sh
+```
 
-- `mvn package` compiles and (via the shade plugin) produces `target\retro-text-editor-1.0-SNAPSHOT-shaded.jar`, a self-contained executable jar.
-- `run.bat` launches that jar with `javaw`.
+- `mvn package` compiles and (via the shade plugin) produces `target/retro-text-editor-1.0-SNAPSHOT-shaded.jar`, a self-contained executable jar.
+- `run.bat` (Windows) launches that jar with `javaw`; `run.sh` (macOS/Linux) launches it with `java`. Both detach immediately rather than blocking the shell/console that ran them, and both print a clear error (instead of a cryptic Java stack trace) if the jar hasn't been built yet.
 
 **No Maven available?** The build is simple enough to do by hand:
 
@@ -45,6 +49,7 @@ java -cp "out;lanterna-3.1.1.jar" br.com.demersonpolli.neonorton.Main
 
 ```
 run.bat [+LINE] [INPUT [OUTPUT]] [/DA|/DB|/DC]
+./run.sh [+LINE] [INPUT [OUTPUT]] [/DA|/DB|/DC]
 run.bat [--line LINE] [--input INPUT] [--output OUTPUT] [--display da|db|dc]
 ```
 
