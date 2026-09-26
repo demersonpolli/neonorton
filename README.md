@@ -7,7 +7,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 ![GitHub last commit](https://img.shields.io/github/last-commit/demersonpolli/neonorton)
-![GitHub repo size](https://img.shields.io/github/repo-size/demersonpolli/neonorton)
+![GitHub repo size](https://img.shields.io/github/repo-size/demersonpolli/neonorton?cachebust=1)
 
 > NeoNorton brings back the full-screen, function-key-driven editing experience of the original
 > Norton Editor — no mouse, no menus, just a fast, muscle-memory-friendly workflow for plain text
