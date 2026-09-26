@@ -1,20 +1,66 @@
 # NeoNorton
 
-> **Historical / hobby software — not recommended for professional use.**  
-> NeoNorton is a retro-style, keyboard-driven text editor inspired by the classic Norton Editor of the 1980s.  
-> It is written in Java using the [Lanterna](https://github.com/mabe02/lanterna) terminal-UI library and is
-> intended as a nostalgic exercise and learning project, not as a production tool. It targets plain text and
-> source code — not arbitrary binary files.
+**A retro, keyboard-driven text editor for the terminal — inspired by the classic Norton Editor of the 1980s.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-17%2B-orange.svg)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+![GitHub last commit](https://img.shields.io/github/last-commit/demersonpolli/neonorton)
+![GitHub repo size](https://img.shields.io/github/repo-size/demersonpolli/neonorton)
+
+> NeoNorton brings back the full-screen, function-key-driven editing experience of the original
+> Norton Editor — no mouse, no menus, just a fast, muscle-memory-friendly workflow for plain text
+> and source code. It's a nostalgic tribute and learning project, not a production IDE.
+
+---
+
+## Table of contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Getting started](#getting-started)
+- [Command-line arguments](#command-line-arguments)
+- [Editor overview](#editor-overview)
+- [Key reference](#key-reference)
+- [F3 — File operations](#f3--file-operations)
+- [F4 — Block operations](#f4--block-operations)
+- [F5 — Format operations](#f5--format-operations)
+- [F6 — Miscellaneous operations](#f6--miscellaneous-operations)
+- [F7 — Printer operations](#f7--printer-operations)
+- [Search and replace](#search-and-replace)
+- [Split-pane mode](#split-pane-mode)
+- [Configuration](#configuration)
+- [Contributing](#contributing)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
+
+---
+
+## Features
+
+- **Full-screen, keyboard-only editing** — every command lives on a function key or a chord; there are no menus and no mouse interaction, faithful to the original Norton Editor.
+- **Split-pane editing** — open a second file side-by-side, jump between panes with <kbd>Tab</kbd>, and copy blocks or diff two files against each other.
+- **Multi-level undo** — a run of consecutively typed characters undoes as a single step; every other edit is its own step.
+- **Block operations** — mark, copy, move, or delete arbitrary regions of text, including across panes.
+- **Literal multi-line search & replace** — find/replace terms that can span multiple lines, with an interactive yes/no/all replace loop.
+- **Three retro display themes** — classic white, green, or amber phosphor, selectable from the command line or saved as a default.
+- **"Print to PDF"** — export the whole buffer or just a marked block to a paginated PDF file, no physical printer or external library required.
+- **Handles large files gracefully** — files are loaded incrementally in chunks, and saving is always safe: unread portions of a file are carried through untouched, so nothing is ever truncated.
+- **Safe, atomic saves** that preserve the original file's line-ending style (CRLF vs. LF).
+- **Persistent configuration** — tab width/mode, word-wrap, format width, indentation, display theme, cursor style, and print settings can all be saved and reloaded automatically on the next launch.
+- **Quick shell access** — drop into a system shell in the current file's folder without leaving the editor.
+- **Cross-platform** — built on the pure-Java [Lanterna](https://github.com/mabe02/lanterna) terminal library; Windows is the primary target, with macOS and Linux support included.
 
 ---
 
 ## Requirements
 
-| Item | Version |
-|------|---------|
-| Java | 17 (LTS recommended) |
-| OS   | Windows primary; macOS/Linux supported but less exercised |
-| Maven | not bundled — install it yourself, or see the fallback build below |
+| Item  | Version |
+|-------|---------|
+| Java  | 17 (LTS recommended) |
+| OS    | Windows primary; macOS/Linux supported but less exercised |
+| Maven | Not bundled — install it yourself, or use the no-Maven fallback below |
 
 > **JDK note:** build and run with a stable LTS JDK (17 or 21). Some newer/non-LTS builds have shown a
 > real compatibility problem with the Lanterna library this project depends on — the editor hangs at
@@ -23,7 +69,7 @@
 
 ---
 
-## Building and running
+## Getting started
 
 ```bat
 mvn package
@@ -34,7 +80,7 @@ mvn package
 ./run.sh
 ```
 
-- `mvn package` compiles and (via the shade plugin) produces `target/retro-text-editor-1.0-SNAPSHOT-shaded.jar`, a self-contained executable jar.
+- `mvn package` compiles the project and, via the shade plugin, produces `target/retro-text-editor-1.0-SNAPSHOT-shaded.jar`, a self-contained executable jar.
 - `run.bat` (Windows) launches that jar with `javaw`; `run.sh` (macOS/Linux) launches it with `java`. Both detach immediately rather than blocking the shell/console that ran them, and both print a clear error (instead of a cryptic Java stack trace) if the jar hasn't been built yet.
 
 **No Maven available?** The build is simple enough to do by hand:
@@ -45,7 +91,9 @@ javac -encoding UTF-8 -cp lanterna-3.1.1.jar -d out src\main\java\br\com\demerso
 java -cp "out;lanterna-3.1.1.jar" br.com.demersonpolli.neonorton.Main
 ```
 
-### Command-line arguments
+---
+
+## Command-line arguments
 
 ```
 run.bat [+LINE] [INPUT [OUTPUT]] [/DA|/DB|/DC]
@@ -67,9 +115,9 @@ If no `INPUT` is given, the splash screen prompts for a filename as before.
 
 ## Editor overview
 
-NeoNorton presents a full-screen terminal window.  
-On startup a splash screen asks for a filename (unless one was given on the command line).  
-All commands are keyboard-driven; there are no menus or mouse interactions.
+NeoNorton presents a full-screen terminal window. On startup a splash screen asks for a filename
+(unless one was given on the command line). All commands are keyboard-driven; there are no menus
+or mouse interactions.
 
 The bottom row is a **status bar** showing:
 
@@ -261,7 +309,26 @@ effect after you save (**F5 S**) and restart the editor.
 
 ---
 
+## Contributing
+
+Issues and pull requests are welcome. This is a small, dependency-light hobby project — there's no
+CI pipeline or automated test suite yet, so please build and exercise the editor manually
+(`mvn package` + `run.bat`/`run.sh`) before submitting a change, and describe what you tested in
+your PR description.
+
+Good first contributions include: fixing a key binding that doesn't match `README.md`/the in-app
+**F1** help, improving macOS/Linux support (only the Windows shell-launch path has been thoroughly
+exercised), or rounding out edge cases in file loading/saving.
+
+---
+
+## Acknowledgments
+
+- Inspired by the **Norton Editor**, Peter Norton's classic DOS-era text editor.
+- Built on [Lanterna](https://github.com/mabe02/lanterna), a pure-Java library for terminal/console text UIs.
+
+---
+
 ## License
 
-This project is provided as-is for educational and nostalgic purposes.  
-No warranty is given. Use at your own risk.
+NeoNorton is released under the [MIT License](LICENSE).
