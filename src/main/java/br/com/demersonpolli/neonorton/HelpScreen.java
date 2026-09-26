@@ -140,7 +140,7 @@ public class HelpScreen implements AppScreen {
                 }
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LogRegistry.error("Error in HelpScreen main loop", e);
         }
     }
 

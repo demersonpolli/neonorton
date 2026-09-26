@@ -614,7 +614,7 @@ public class EditorScreen implements AppScreen {
                 redraw(screen);
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LogRegistry.error("Error in EditorScreen main loop", e);
         }
     }
 
