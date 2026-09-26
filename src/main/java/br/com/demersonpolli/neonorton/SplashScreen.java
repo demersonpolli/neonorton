@@ -75,7 +75,7 @@ public class SplashScreen implements AppScreen {
             }
 
         } catch (IOException e) {
-            e.printStackTrace();
+            LogRegistry.error("Error in SplashScreen main loop", e);
         }
     }
 

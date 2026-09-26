@@ -77,7 +77,7 @@ public class StatusScreen implements AppScreen {
                 if (key.getKeyType() == KeyType.Escape) break;
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LogRegistry.error("Error in StatusScreen main loop", e);
         }
     }
 

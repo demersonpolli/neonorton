@@ -202,7 +202,7 @@ public class Main {
             screen.stopScreen();
             terminal.dispose();
         } catch (IOException e) {
-            e.printStackTrace();
+            LogRegistry.error("Error during application startup", e);
         }
     }
 }
